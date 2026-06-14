@@ -121,10 +121,12 @@ The code is built upon open-source projects including [MoMask++](https://github.
 If you find this work useful, please cite:
 
 ```bibtex
-@article{zheng2026moscale,
-  title={Next-Scale Autoregressive Models for Text-to-Motion Generation},
-  author={Zheng, Zhiwei and Jin, Shibo and Liu, Lingjie and Zhao, Mingmin},
-  journal={arXiv preprint arXiv:2604.03799},
-  year={2026}
+@InProceedings{Zheng_2026_moscale,
+    author    = {Zheng, Zhiwei and Jin, Shibo and Liu, Lingjie and Zhao, Mingmin},
+    title     = {Next-Scale Autoregressive Models for Text-to-Motion Generation},
+    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+    month     = {June},
+    year      = {2026},
+    pages     = {16376-16386}
 }
 ```
