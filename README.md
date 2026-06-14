@@ -93,12 +93,23 @@ python train_moscale.py
 Configuration: `config/train_moscale.yaml`
 
 
+## ✏️ Motion Editing
+
+Regenerate a specified region of a source motion conditioned on a new text prompt:
+
+```bash
+python edt_t2m.py
+```
+
+Configuration: `config/edit.yaml`. Set `source_motion` to your source motion `.npy` file, `text_prompt` to the desired description, and `mask_edit_section` to the `"start, end"` fraction of the motion to edit (e.g. `["0.0, 0.6"]`).
+
+
 ## 📝 Todo
 
 - [x] Release inference code
 - [x] Release checkpoints
 - [x] Release training code
-- [ ] Release editing code
+- [x] Release editing code
 
 
 ## 🙏 Acknowledgements

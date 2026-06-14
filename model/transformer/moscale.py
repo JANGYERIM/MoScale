@@ -779,3 +779,220 @@ class MoScale(nn.Module):
             return_list.append(pred_idx)
 
         return return_list
+
+    @torch.no_grad()
+    @eval_decorator
+    def edit(self, conds, m_lens, source_tokens,
+             edit_start_frac, edit_end_frac,
+             cond_scale, temperature=1, top_p_thres=0.9,
+             vq_model=None, sample_time=None):
+
+        if sample_time is not None:
+            self.sample_level_times = sample_time
+
+        non_pad_mask = []
+        for scale in self.scales:
+            non_pad_mask.append(
+                lengths_to_mask((m_lens // scale).long(), int(self.full_length // scale))
+            )
+        non_pad_mask_stack = torch.cat(non_pad_mask, dim=1).repeat(2, 1)  # [2B, L]
+
+        B = len(conds)
+        device = m_lens.device
+
+        # ---- Text encoding ----
+        cond_embs, cond_att_mask = self.encode_text(conds)
+        cond_padding_mask = (cond_att_mask == 0)
+
+        max_seqlen_k = self.text_cond_length
+        indi_length = [0]
+        indi_feature = []
+        for i in range(cond_embs.shape[0]):
+            current_length = (~cond_padding_mask[i]).sum().item()
+            indi_length.append(current_length)
+            indi_feature.append(cond_embs[i, :current_length, :])
+
+        cu_seqlens_k = torch.tensor(indi_length, device=self.device).cumsum(0).to(torch.int32)
+        lens = indi_length[1:]
+        kv_compact = torch.cat(indi_feature, dim=0)
+
+        # CFG: duplicate with unconditional embeddings
+        kv_compact_un = kv_compact.clone()
+        total = 0
+        for le in lens:
+            kv_compact_un[total:total + le] = self.cfg_uncond[:le]
+            total += le
+        kv_compact = torch.cat((kv_compact, kv_compact_un), dim=0)
+        cu_seqlens_k = torch.cat((cu_seqlens_k, cu_seqlens_k[1:] + cu_seqlens_k[-1]), dim=0)
+
+        kv_compact = self.text_norm(kv_compact).contiguous()
+        sos = self.text_proj_for_sos((kv_compact, cu_seqlens_k, max_seqlen_k)).float().contiguous()
+        cond_BD = sos.max(dim=1).values.unsqueeze(1)   # [2B, 1, C]
+
+        if self.use_crossattn:
+            kv_compact = self.text_proj_for_ca(kv_compact).contiguous()
+            ca_kv = kv_compact, cu_seqlens_k, max_seqlen_k
+        else:
+            ca_kv = None
+
+        cond_BD_or_gss = self.shared_ada_lin(cond_BD).contiguous()
+
+        feat_seq_len = self.patch_sizes[-1]
+        num_stages_minus_1 = len(self.patch_sizes) - 1
+        f_hat = cond_BD.new_zeros(B, self.code_dim, feat_seq_len)
+        return_list = []
+
+        attn_bias = self.attn_bias_for_masking.repeat(2 * B, 1, 1, 1)
+        next_token_map = sos.expand(2 * B, self.patch_sizes[0], -1)
+        cur_L = 0
+
+        x_in = None
+        prev_input_token_embeddings = None
+
+        pl_fine = self.patch_sizes[-1]
+        edit_mask_fine = torch.zeros(B, pl_fine, dtype=torch.float, device=device)
+        for b in range(B):
+            seq_len_fine = int(non_pad_mask[-1][b].sum().item())  # valid tokens at finest scale
+            s = int(round(edit_start_frac * seq_len_fine))
+            e = int(round(edit_end_frac * seq_len_fine))
+            edit_mask_fine[b, s:e] = 1.0
+
+        for i, pl in enumerate(self.patch_sizes):
+            cur_L += pl
+
+            if i == 0:
+                x_in = next_token_map
+            else:
+                x_in = torch.cat([x_in, next_token_map], dim=1)
+            x_out = x_in.clone()
+
+            padding_mask = ~non_pad_mask_stack[:B, cur_L - pl:cur_L]  # [B, pl], True=padding
+            cur_attn_bias = attn_bias[:, :, :cur_L, :cur_L]
+
+
+            edit_mask = torch.zeros(B, pl, dtype=torch.bool, device=device)
+            for b in range(B):
+                seq_len = int(non_pad_mask[i][b].sum().item())       # valid tokens at this scale
+                if seq_len == 0:
+                    continue
+                seq_len_fine = int(non_pad_mask[-1][b].sum().item())  # valid tokens at finest scale
+                fine = edit_mask_fine[b, :seq_len_fine].view(1, 1, -1)
+                coarse = F.interpolate(fine, size=seq_len, mode='area').view(-1)
+                edit_mask[b, :seq_len] = coarse.gt(0.5)
+            edit_mask = edit_mask & ~padding_mask  # never edit target-padding positions
+
+            # ---- Initialise ids from source tokens ----
+            orig_ids = source_tokens[i].to(device)   # [B, pl], -1 for source-padding
+
+            # Extension support: positions that are valid in the TARGET motion but
+            # were padding in the SOURCE (orig_ids == -1) must be predicted, not locked.
+            # This covers the case where target length > source length.
+            source_pad = (orig_ids == self.pad_id)          # [B, pl]
+            extension_mask = source_pad & ~padding_mask     # valid in target, absent in source
+            edit_mask = edit_mask | extension_mask
+
+            ids = orig_ids.clone()
+            ids[edit_mask] = self.mask_id
+
+            # ---- Scores: 1e5 for locked positions, 0 for the predict region ----
+            # Locked positions (unedited source tokens) will never be selected for
+            # re-masking because their score is always the highest.
+            scores = torch.where(edit_mask,
+                                 torch.zeros(B, pl, device=device),
+                                 torch.full((B, pl), 1e5, device=device))
+
+            cur_timestep = self.sample_level_times[i]
+
+            for timestep_idx, timestep in enumerate(
+                    torch.linspace(0, 1, cur_timestep, device=device)):
+
+                rand_mask_prob = self.noise_schedule(timestep)
+                # Use pl as the count baseline; non-edit positions (score=1e5) can
+                # never win the argsort competition, so only edit tokens are re-masked.
+                num_token_masked = torch.round(rand_mask_prob * pl).clamp(min=1)
+
+                sorted_indices = scores.argsort(dim=1)
+                ranks = sorted_indices.argsort(dim=1)
+                is_mask = (ranks < num_token_masked.unsqueeze(-1))
+                is_mask = is_mask & edit_mask  # strictly restrict to edit region
+                ids = torch.where(is_mask, torch.full_like(ids, self.mask_id), ids)
+
+                input_token_embeddings = torch.zeros(
+                    (B, pl, self.code_dim), device=device, dtype=x_out.dtype)
+                non_pad_pos = (ids != self.pad_id) & (ids != self.mask_id)
+                input_token_embeddings[non_pad_pos] = self.dequantize(ids[non_pad_pos], vq_model)
+                input_token_embeddings[ids == self.mask_id] = self.masked_token_embedding
+                input_token_embeddings[ids == self.pad_id] = self.padded_token_embedding
+                input_token_embeddings = self.token_dim_proj(input_token_embeddings)
+
+                if prev_input_token_embeddings is not None:
+                    input_token_embeddings = torch.cat(
+                        [prev_input_token_embeddings, input_token_embeddings], dim=1)
+                input_token_embeddings = input_token_embeddings.repeat(2, 1, 1)
+
+                x_out_token = torch.cat((x_out, input_token_embeddings), dim=-1)
+                x_out_token = self.latent_dim_proj(x_out_token)
+
+                x_out_token[:, :self.first_l] = (
+                    x_out_token[:, :self.first_l]
+                    + self.pos_start.expand(2 * B, self.first_l, -1))
+                x_out_token = x_out_token + self.lvl_embed(
+                    self.lvl_1L[:, :cur_L].expand(2 * B, -1))
+                rope_batch = self.infer_rope_base[:x_out_token.shape[0], ..., :cur_L, :]
+
+                for b in self.masked_blocks:
+                    x_out_token = b(x=x_out_token, cond_BD=cond_BD_or_gss,
+                                    attn_bias=cur_attn_bias, ca_kv=ca_kv,
+                                    rope_batch=rope_batch)
+
+                logits_BlV = self.get_logits(x_out_token.float(), cond_BD)
+                # CFG blending
+                t = cond_scale + (i - 1) * (-0.25)
+                logits_BlV = (1 + t) * logits_BlV[:B] - t * logits_BlV[B:]
+                logits_BlV = logits_BlV[:, -pl:, :]
+
+                pred_ids = sample_with_top_k_top_p_(
+                    logits_BlV, rng=self.rng, top_k=0, top_p=top_p_thres,
+                    num_samples=1, temperature=temperature)[:, :, 0]
+                ids = torch.where(is_mask, pred_ids, ids)
+
+
+                probs = logits_BlV.softmax(dim=-1)
+                scores = probs.gather(2, pred_ids.unsqueeze(-1)).squeeze(-1)
+                scores = scores.masked_fill(~is_mask, 1e5)
+
+            ids = torch.where(padding_mask, torch.full_like(ids, self.pad_id), ids)
+            idx_Bl = torch.where(edit_mask, ids, source_tokens[i].to(device))
+            idx_Bl = torch.where(padding_mask, torch.full_like(idx_Bl, self.pad_id), idx_Bl)
+            assert self.patch_sizes[i] == idx_Bl.shape[1]
+
+            h_BCl = vq_model.quantizer.dequantize(idx_Bl).transpose(1, 2)
+            h_BCl = h_BCl[:, :, -self.patch_sizes[i]:]
+
+            gt_h_BCl = vq_model.quantizer.dequantize(source_tokens[i].to(device)).transpose(1, 2)
+            gt_h_BCl = gt_h_BCl[:, :, -self.patch_sizes[i]:]
+            need_predict = edit_mask.int().unsqueeze(1)   # [B, 1, pl]
+            h_BCl = gt_h_BCl * (1 - need_predict) + h_BCl * need_predict
+
+            cur_token_embeddings = self.dequantize(idx_Bl, vq_model).clone()
+            padded_position = (idx_Bl == self.pad_id)
+            cur_token_embeddings[padded_position] = self.padded_token_embedding
+            if prev_input_token_embeddings is None:
+                prev_input_token_embeddings = self.token_dim_proj(cur_token_embeddings)
+            else:
+                prev_input_token_embeddings = torch.cat(
+                    [prev_input_token_embeddings,
+                     self.token_dim_proj(cur_token_embeddings)], dim=1)
+
+            f_hat, next_token_map = self.get_next_autoregressive_input(
+                i, len(self.patch_sizes), f_hat, h_BCl, non_pad_mask, vq_model)
+            if i != num_stages_minus_1:
+                next_token_map = next_token_map.transpose(1, 2)
+                next_token_map = self.input_process(next_token_map)
+                next_token_map = next_token_map.repeat(2, 1, 1)
+
+            pred_idx = idx_Bl[..., -self.patch_sizes[i]:]
+            pred_idx = torch.where(~non_pad_mask[i], -1, pred_idx)
+            return_list.append(pred_idx)
+
+        return return_list, f_hat

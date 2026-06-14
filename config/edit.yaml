@@ -1,0 +1,26 @@
+root_ckpt_dir: './checkpoint_dir'
+device: 'cuda:0'
+seed: 10010
+
+moscale_name: "moscale"        # set to your trained MoScale experiment name
+which_epoch: net_best_fid.tar
+ext: edit_test                 # output sub-directory name
+
+# ---- Editing inputs ----
+source_motion: '/path/to/the/source/motion.npy' # Path to your source motion .npy ([T, 263])
+text_prompt: "your target text description."  # Target text prompt
+mask_edit_section: ["0.0, 0.6"]   # [start, end] fraction of the motion to edit
+target_length: [-1, ]             # -1 keeps the source length; set > source length to extend
+repeat_time: 5                    # number of samples to generate
+
+# ---- Sampling ----
+cond_scales: [5]
+sample_times: [[1, 2, 5, 10]]     # per-scale sampling steps
+temperature: [1]                  # lower -> more deterministic
+
+data:
+  name: 'humanml3d'
+  unit_length: 4
+  joint_num: 22
+  fps: 20
+  max_motion_length: 196
