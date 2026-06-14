@@ -39,7 +39,7 @@ if __name__ == "__main__":
     cfg.exp.checkpoint_dir = pjoin(cfg.exp.root_ckpt_dir, cfg.data.name, 'hrvqvae', cfg.exp.name)
     os.makedirs(cfg.exp.checkpoint_dir, exist_ok=True)
     shutil.copy('config/train_hrvqvae.yaml', cfg.exp.checkpoint_dir)
-    wandb.init(project="var-VQVAE-hml-local", dir=cfg.exp.checkpoint_dir, config=dict(cfg), name=cfg.exp.name)
+    wandb.init(project="Hier-VQVAE", dir=cfg.exp.checkpoint_dir, config=dict(cfg), name=cfg.exp.name)
     
     fixseed(cfg.exp.seed)
 

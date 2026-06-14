@@ -297,7 +297,7 @@ class MoScale(nn.Module):
         # block-wise causal mask
         patch_sizes = self.patch_sizes
         L = sum(patch_sizes)
-        d = torch.cat([torch.full((pn,), i, dtype=torch.long) for i, pn in enumerate(patch_sizes)]).view(1, L, 1)
+        d = torch.cat([torch.full((pl,), i, dtype=torch.long) for i, pl in enumerate(patch_sizes)]).view(1, L, 1)
         dT = d.transpose(1, 2)    # dT: 11L
         lvl_1L = dT[:, 0].contiguous()
         self.register_buffer('lvl_1L', lvl_1L)    # [1, 91] [[0*20,1,1,1,1,1,1,1,1,1,1,1,1,2...]]
@@ -338,7 +338,6 @@ class MoScale(nn.Module):
             elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d, nn.SyncBatchNorm, nn.GroupNorm, nn.InstanceNorm1d, nn.InstanceNorm2d, nn.InstanceNorm3d)):
                 if with_weight: m.weight.data.fill_(1.)
                 if with_bias: m.bias.data.zero_()
-            # conv: VAR has no conv, only VQVAE has conv
             elif isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d)):
                 if conv_std_or_gain > 0: nn.init.trunc_normal_(m.weight.data, std=conv_std_or_gain)
                 else: nn.init.xavier_normal_(m.weight.data, gain=-conv_std_or_gain)
@@ -420,16 +419,16 @@ class MoScale(nn.Module):
     def get_logits(self, h: torch.Tensor, cond_BD: Optional[torch.Tensor]):
         return self.head(self.head_nm(h.float(), cond_BD).float()).float()
     
-    def get_next_autoregressive_input(self, si: int, SN: int, f_hat: torch.Tensor, h_BChw: torch.Tensor, non_pad_mask, vq_model) -> Tuple[Optional[torch.Tensor], torch.Tensor]: # only used in VAR inference
+    def get_next_autoregressive_input(self, si: int, SN: int, f_hat: torch.Tensor, h_BCl: torch.Tensor, non_pad_mask, vq_model) -> Tuple[Optional[torch.Tensor], torch.Tensor]: # only used in inference
         feat_seq_len = self.patch_sizes[-1]
         current_mask = non_pad_mask[si].unsqueeze(-1).permute(0, 2, 1)  # (B, L, 1)
-        h_BChw = h_BChw * current_mask.float()  # B, Cvae(512), L
+        h_BCl = h_BCl * current_mask.float()  # B, Cvae(512), L
         if si != SN-1:
-            h = vq_model.quantizer.quant_resi[si/(SN-1)](F.interpolate(h_BChw, size=feat_seq_len, mode='linear'))     # conv after upsample
+            h = vq_model.quantizer.quant_resi[si/(SN-1)](F.interpolate(h_BCl, size=feat_seq_len, mode='linear'))     # conv after upsample
             f_hat.add_(h)
             return f_hat, F.interpolate(f_hat, size=self.patch_sizes[si+1], mode='area')
         else:
-            h = vq_model.quantizer.quant_resi[si/(SN-1)](h_BChw)
+            h = vq_model.quantizer.quant_resi[si/(SN-1)](h_BCl)
             f_hat.add_(h)
             return f_hat, f_hat
     
@@ -758,8 +757,8 @@ class MoScale(nn.Module):
             idx_Bl = ids
             assert self.patch_sizes[i] == idx_Bl.shape[1]
 
-            h_BChw = vq_model.quantizer.dequantize(idx_Bl).transpose(1, 2)
-            h_BChw = h_BChw[:, :, -self.patch_sizes[i]:]
+            h_BCl = vq_model.quantizer.dequantize(idx_Bl).transpose(1, 2)
+            h_BCl = h_BCl[:, :, -self.patch_sizes[i]:]
 
             cur_token_embeddings = self.dequantize(idx_Bl, vq_model).clone()
             padded_position = (idx_Bl == self.pad_id)
@@ -769,7 +768,7 @@ class MoScale(nn.Module):
             else:
                 prev_input_token_embeddings = torch.cat([prev_input_token_embeddings, self.token_dim_proj(cur_token_embeddings)], dim=1)
 
-            f_hat, next_token_map = self.get_next_autoregressive_input(i, len(self.patch_sizes), f_hat, h_BChw, non_pad_mask, vq_model)
+            f_hat, next_token_map = self.get_next_autoregressive_input(i, len(self.patch_sizes), f_hat, h_BCl, non_pad_mask, vq_model)
             if i != num_stages_minus_1:
                 next_token_map = next_token_map.transpose(1, 2)
                 next_token_map = self.input_process(next_token_map)
