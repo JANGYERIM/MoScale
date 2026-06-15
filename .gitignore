@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Checkpoints & logs
+checkpoint_dir/
+log/
+logs/
+wandb/
+wandb.txt
+
+# Dataset & pretrained
+dataset/
+glove/
+
+# Misc
+*.out
+*.err

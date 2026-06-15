@@ -1,13 +1,13 @@
 exp:
   root_ckpt_dir: './checkpoint_dir'
   root_log_dir: './log'
-  name: hrvqvae
+  name: T_VQ_V1
   device: 'cuda:0'
   seed: 10306
 
 data:
   name: 'humanml3d'
-  root_dir: '/your/path/dataset/HumanML3D'  # TODO: update to your dataset/HumanML3D path
+  root_dir: '/nas2/data/dpfla3573/code/MoScale/dataset/HumanML3D'
   dim_pose: 263
 
 quantizer:

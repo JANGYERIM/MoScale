@@ -8,4 +8,4 @@ repeat_time: 20
 
 data:
   name: 'humanml3d'
-  root_dir: '/your/path/dataset/HumanML3D'  # TODO: update to your dataset/HumanML3D path
+  root_dir: '/nas2/data/dpfla3573/code/MoScale/dataset/HumanML3D'

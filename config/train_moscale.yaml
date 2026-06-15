@@ -1,7 +1,7 @@
 exp:
   root_ckpt_dir: './checkpoint_dir'
   root_log_dir: './log'
-  name: 'moscale'
+  name: 'T_MS_V1'
   device: 'cuda:0'
   seed: 10306
 
@@ -12,7 +12,7 @@ vq_ckpt: "net_best_fid.tar"
 data:
   name: 'humanml3d'
   unit_length: 4
-  root_dir: '/your/path/dataset/HumanML3D'  # TODO: update to your dataset/HumanML3D path
+  root_dir: '/nas2/data/dpfla3573/code/MoScale/dataset/HumanML3D'
   joint_num: 22
   dim_pose: 263
   fps: 20
