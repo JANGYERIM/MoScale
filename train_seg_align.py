@@ -50,12 +50,12 @@ def compute_clip_mean(tokenizer, clip_model, jsonl_path, device, max_samples=500
 def encode_segments(tokenizer, clip_model, seg_texts_batch, device, clip_mean=None):
     B, max_n = len(seg_texts_batch), len(seg_texts_batch[0])
     flat_texts = [t for sample in seg_texts_batch for t in sample]
-    with torch.no_grad():
-        tok = tokenizer(flat_texts, padding=True, truncation=True,
-                        max_length=77, return_tensors='pt').to(device)
-        embeds = clip_model(**tok).pooler_output
-        if clip_mean is not None:
-            embeds = F.normalize(embeds - clip_mean.unsqueeze(0), dim=-1)
+    # no_grad 제거: CLIP last 2 layer gradient 흘려야 함
+    tok = tokenizer(flat_texts, padding=True, truncation=True,
+                    max_length=77, return_tensors='pt').to(device)
+    embeds = clip_model(**tok).pooler_output
+    if clip_mean is not None:
+        embeds = F.normalize(embeds - clip_mean.unsqueeze(0), dim=-1)
     return embeds.reshape(B, max_n, -1)
 
 
@@ -87,13 +87,22 @@ if __name__ == '__main__':
                               shuffle=True, num_workers=8, drop_last=True,
                               collate_fn=seg_collate_fn)
 
-    # CLIP (frozen)
+    # CLIP: 마지막 2 레이어 + final_layer_norm만 fine-tune
     clip_tokenizer  = CLIPTokenizer.from_pretrained(cfg.model.clip_model)
-    clip_text_model = CLIPTextModel.from_pretrained(cfg.model.clip_model).to(device).eval()
+    clip_text_model = CLIPTextModel.from_pretrained(cfg.model.clip_model).to(device)
     for p in clip_text_model.parameters():
         p.requires_grad = False
+    for layer in clip_text_model.text_model.encoder.layers[-2:]:
+        for p in layer.parameters():
+            p.requires_grad = True
+    for p in clip_text_model.text_model.final_layer_norm.parameters():
+        p.requires_grad = True
+    clip_trainable = [p for p in clip_text_model.parameters() if p.requires_grad]
+    print(f"[CLIP] fine-tune last 2 layers: "
+          f"{sum(p.numel() for p in clip_trainable)/1e6:.2f}M params trainable")
 
     clip_mean_path = 'config/clip_mean.pt'
+    clip_text_model.eval()
     if os.path.exists(clip_mean_path):
         clip_mean = torch.load(clip_mean_path, map_location=device)
         print(f"[CLIP centering] loaded from {clip_mean_path}")
@@ -119,14 +128,16 @@ if __name__ == '__main__':
     print(f"[Stage 1] trainable modules: {set(n.split('.')[0] for n in trainable)}")
 
     num_epochs = cfg.training.get('stage1_epochs', 50)
-    optimizer  = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, net.parameters()),
-        lr=cfg.training.lr, weight_decay=cfg.training.weight_decay
-    )
+    lr_clip    = cfg.training.get('lr_clip', 1e-5)
+    optimizer  = torch.optim.AdamW([
+        {'params': filter(lambda p: p.requires_grad, net.parameters()), 'lr': cfg.training.lr},
+        {'params': clip_trainable, 'lr': lr_clip},
+    ], weight_decay=cfg.training.weight_decay)
 
     global_step = 0
     for epoch in range(num_epochs):
         net.train()
+        clip_text_model.train()   # last 2 layers 업데이트 활성화
         ep_align, ep_steps = 0., 0
         log_cosim_this_epoch = (epoch % 20 == 0)
 
@@ -206,7 +217,8 @@ if __name__ == '__main__':
 
             optimizer.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+            nn.utils.clip_grad_norm_(
+                list(net.parameters()) + clip_trainable, 1.0)
             optimizer.step()
 
             ep_align += loss.item()
@@ -226,8 +238,14 @@ if __name__ == '__main__':
     save_path  = pjoin(ckpt_dir, f'{ckpt_name}.tar')
     torch.save({
         'epoch': num_epochs,
-        'encoder':           net.encoder.state_dict(),
-        'align_proj_motion': net.align_proj_motion.state_dict(),
-        'align_proj_text':   net.align_proj_text.state_dict(),
+        'encoder':              net.encoder.state_dict(),
+        'align_proj_motion':    net.align_proj_motion.state_dict(),
+        'align_proj_text':      net.align_proj_text.state_dict(),
+        # fine-tuned CLIP layers (test time에도 동일하게 써야 함)
+        'clip_last2_layers': [
+            clip_text_model.text_model.encoder.layers[-2].state_dict(),
+            clip_text_model.text_model.encoder.layers[-1].state_dict(),
+        ],
+        'clip_final_layer_norm': clip_text_model.text_model.final_layer_norm.state_dict(),
     }, save_path)
     print(f"\n[Stage 1 완료] saved → {save_path}")

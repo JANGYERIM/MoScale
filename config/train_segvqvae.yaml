@@ -29,9 +29,10 @@ model:
 training:
   batch_size: 256
   num_epochs: 500
-  stage1_epochs: 50        # train_seg_align.py (Stage 1) 학습 에폭 수
-  stage1_ckpt_name: 'stage1_encoder_v2'   # 저장/로드할 Stage 1 체크포인트 파일 이름 (.tar 자동 부여)
+  stage1_epochs: 200        # train_seg_align.py (Stage 1) 학습 에폭 수
+  stage1_ckpt_name: 'stage1_encoder_v2-1'   # 저장/로드할 Stage 1 체크포인트 파일 이름 (.tar 자동 부여)
   lr: 2.0e-4
+  lr_clip: 1.0e-5        # CLIP last 2 layer fine-tune LR
   weight_decay: 0.0
   lambda_commit: 0.02
   lambda_commit_hrv: 0.002

@@ -1,13 +1,13 @@
 #!/usr/bin/bash
 
-#SBATCH -J SegAlign_S1
+#SBATCH -J SegAlign_V2-1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=29G
 #SBATCH -p batch_grad
 #SBATCH -w ariel-v3
 #SBATCH -t 1-0
-#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_seg_align_s1.out
+#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_seg_align_v2-1.out
 
 cd /nas2/data/dpfla3573/code/MoScale
 export PYTHONPATH=/nas2/data/dpfla3573/code/MoScale:$PYTHONPATH
