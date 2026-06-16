@@ -112,9 +112,11 @@ class MoScaleTrainer(BaseTrainer):
             )
         best_acc = 0.
         global_best_top1 = 0
+        global_best_fid = float('inf')
 
-        early_stop_epoch = self.cfg.training.get('early_stop_epoch', self.cfg.training.max_epoch)
-        while epoch < min(self.cfg.training.max_epoch, early_stop_epoch):
+        patience = self.cfg.training.get('patience', 10)
+        no_improve_count = 0
+        while epoch < self.cfg.training.max_epoch:
             self.moscale.train()
             self.vq_model.eval()
 
@@ -212,7 +214,21 @@ class MoScaleTrainer(BaseTrainer):
                     )
 
 
+                if best_fid < global_best_fid:
+                    global_best_fid = best_fid
+                    self.save(pjoin(self.cfg.exp.model_dir, 'net_best_fid.tar'), epoch)
+                    print(f"New global best FID: {global_best_fid:.4f} at epoch {epoch}, saved net_best_fid.tar")
+
                 if best_top1 > global_best_top1:
                     global_best_top1 = best_top1
+                    no_improve_count = 0
                     self.save(pjoin(self.cfg.exp.model_dir, 'net_best_top1.tar'), epoch)
                     print(f"New global best top1: {global_best_top1:.3f} at epoch {epoch}, saved net_best_top1.tar")
+                else:
+                    no_improve_count += 1
+                    print(f"No improvement for {no_improve_count}/{patience} eval cycles (best top1: {global_best_top1:.3f})")
+                    if no_improve_count >= patience:
+                        print(f"Early stopping triggered at epoch {epoch} (no top1 improvement for {patience} eval cycles)")
+                        break
+
+            self.save(pjoin(self.cfg.exp.model_dir, 'net_latest.tar'), epoch)

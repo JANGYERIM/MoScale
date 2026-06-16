@@ -2,7 +2,7 @@ exp:
   root_ckpt_dir: './checkpoint_dir'
   device: 'cuda:0'
 
-vqvae_name: 'hrvqvae'  # set to your trained HRVQVAE experiment name (exp.name in train_hrvqvae.yaml)
+vqvae_name: 'T_VQ_V1'  # set to your trained HRVQVAE experiment name (exp.name in train_hrvqvae.yaml)
 
 repeat_time: 20
 

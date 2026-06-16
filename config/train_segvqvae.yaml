@@ -1,0 +1,41 @@
+exp:
+  name: 'seg_vq_v1'
+  seed: 42
+  device: 'cuda:0'
+  root_ckpt_dir: './checkpoint_dir'
+  root_log_dir: './log'
+
+data:
+  name: 'humanml3d'
+  root_dir: '/nas2/data/dpfla3573/code/MoScale/dataset/HumanML3D'
+  dim_pose: 263
+  max_n_seg: 8
+  seg_jsonl_train: 'config/train.jsonl'
+  seg_jsonl_val: 'config/val.jsonl'
+
+model:
+  motion_dim: 263
+  latent_dim: 512
+  down_t: 2           # 4x temporal downsample (196 → 49)
+  stride_t: 2
+  width: 512
+  depth: 3
+  dilation_growth_rate: 3
+  clip_dim: 512       # openai/clip-vit-base-patch32 text dim
+  clip_model: 'openai/clip-vit-base-patch32'
+  nb_code: 512
+  align_dim: 256
+
+training:
+  batch_size: 256
+  num_epochs: 500
+  stage1_epochs: 50        # train_seg_align.py (Stage 1) 학습 에폭 수
+  stage1_ckpt_name: 'stage1_encoder_v2'   # 저장/로드할 Stage 1 체크포인트 파일 이름 (.tar 자동 부여)
+  lr: 2.0e-4
+  weight_decay: 0.0
+  lambda_commit: 0.02
+  lambda_commit_hrv: 0.002
+  lambda_align: 0.01
+  log_every: 50
+  save_every: 50
+  val_every: 5

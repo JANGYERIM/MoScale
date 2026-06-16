@@ -42,7 +42,7 @@ model:
 training:
   batch_size: 64
   max_epoch: 250
-  early_stop_epoch: 120
+  patience: 10          # eval cycles without top1 improvement before stopping
   cond_drop_prob: 0.1
   perturb_rate: [0.0, 0.6]
   lr: 3.0e-4
