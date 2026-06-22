@@ -69,7 +69,8 @@ if __name__ == '__main__':
 
     # Stage 1 encoder + align projectors 로드 후 freeze
     ckpt_name = cfg.training.get('stage1_ckpt_name', 'stage1_encoder')
-    s1_path = pjoin(ckpt_dir, f'{ckpt_name}.tar')
+    s1_path   = pjoin(ckpt_dir, f'{ckpt_name}.tar')
+    s2_name   = cfg.training.get('stage2_ckpt_name', 'stage2_vqdec')
     s1_ckpt = torch.load(s1_path, map_location=device)
     net.encoder.load_state_dict(s1_ckpt['encoder'])
     net.align_proj_motion.load_state_dict(s1_ckpt['align_proj_motion'])
@@ -233,10 +234,10 @@ if __name__ == '__main__':
                 best_val_loss = val_recon
                 torch.save({'epoch': epoch, 'model': net.state_dict(),
                             'optimizer': optimizer.state_dict()},
-                           pjoin(ckpt_dir, 'stage2_best.tar'))
+                           pjoin(ckpt_dir, f'{s2_name}_best.tar'))
                 print(f"  --> best saved (recon={val_recon:.4f})")
 
         if (epoch + 1) % cfg.training.save_every == 0:
             torch.save({'epoch': epoch, 'model': net.state_dict(),
                         'optimizer': optimizer.state_dict()},
-                       pjoin(ckpt_dir, f'stage2_ep{epoch+1:04d}.tar'))
+                       pjoin(ckpt_dir, f'{s2_name}_ep{epoch+1:04d}.tar'))

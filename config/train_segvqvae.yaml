@@ -31,6 +31,7 @@ training:
   num_epochs: 500
   stage1_epochs: 50        # train_seg_align.py (Stage 1) 학습 에폭 수
   stage1_ckpt_name: 'stage1_encoder_v2'   # 저장/로드할 Stage 1 체크포인트 파일 이름 (.tar 자동 부여)
+  stage2_ckpt_name: 'stage2_vqdec_v1-3'     # Stage 2 저장 이름 (best/주기 모두 이 prefix 사용)
   lr: 2.0e-4
   weight_decay: 0.0
   lambda_commit: 0.02
