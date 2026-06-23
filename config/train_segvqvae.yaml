@@ -1,5 +1,5 @@
 exp:
-  name: 'seg_vq_v1'
+  name: 'seg_align_V3-1'
   seed: 42
   device: 'cuda:0'
   root_ckpt_dir: './checkpoint_dir'
@@ -30,8 +30,11 @@ training:
   batch_size: 256
   num_epochs: 500
   stage1_epochs: 200        # train_seg_align.py (Stage 1) 학습 에폭 수
-  stage1_ckpt_name: 'stage1_encoder_v2-1'   # 저장/로드할 Stage 1 체크포인트 파일 이름 (.tar 자동 부여)
-  plugin_ckpt_name: 'Segalign_V3-1'       # train_seg_align_plugin.py 저장 이름
+  stage1_ckpt_name: 'plugin_align_v3-1'   # 저장/로드할 Stage 1 체크포인트 파일 이름 (.tar 자동 부여)
+  stage2_ckpt_name: 'plugin_vqdec_v3-3'    # Stage 2 체크포인트 파일 이름 접두사 (_best / _ep{N} 자동 부여)
+  hrv_ckpt_path: './checkpoint_dir/humanml3d/hrvqvae/hrvqvae/model/net_best_fid.tar'  # HRVQVAE encoder/decoder plug-in (codebook은 residual 분포로 새로 학습)
+  plugin_ckpt_path: './checkpoint_dir/humanml3d/seg_align_plugin/seg_align_V3-1/plugin_align_v3-1.tar'  # align_proj 로드 경로 (null이면 random init)
+  plugin_ckpt_name: 'plugin_align_v3-1'       # train_seg_align_plugin.py 저장 이름
   plugin_epochs: 100                         # plugin alignment 학습 에폭 수
   lr: 2.0e-4
   lr_clip: 1.0e-5        # CLIP last 2 layer fine-tune LR

@@ -67,31 +67,55 @@ if __name__ == '__main__':
     net = SegVQVAE(cfg).to(device)
     print(f"SegVQVAE params: {sum(p.numel() for p in net.parameters()) / 1e6:.2f}M")
 
-    # Stage 1 encoder + align projectors 로드 후 freeze
-    ckpt_name = cfg.training.get('stage1_ckpt_name', 'stage1_encoder')
-    s1_path = pjoin(ckpt_dir, f'{ckpt_name}.tar')
-    s1_ckpt = torch.load(s1_path, map_location=device)
-    net.encoder.load_state_dict(s1_ckpt['encoder'])
-    net.align_proj_motion.load_state_dict(s1_ckpt['align_proj_motion'])
-    net.align_proj_text.load_state_dict(s1_ckpt['align_proj_text'])
-    print(f"[Stage 2] loaded encoder from {s1_path}")
+    s2_name = cfg.training.get('stage2_ckpt_name', 'stage2_vqdec')
 
-    # freeze: encoder, align projectors, seg_pool, vq (모두 사용 안 함)
+    # HRVQVAE plug-in: encoder / codebook / decoder 모두 로드 후 freeze
+    hrv_ckpt_path = cfg.training.get('hrv_ckpt_path', None)
+    if hrv_ckpt_path:
+        hrv_ckpt = torch.load(hrv_ckpt_path, map_location=device)
+        hrv_model = hrv_ckpt['vq_model']
+
+        encoder_state = {k[len('encoder.'):]: v
+                         for k, v in hrv_model.items() if k.startswith('encoder.')}
+        net.encoder.load_state_dict(encoder_state)
+        print(f"[Stage 2] loaded HRVQVAE encoder → frozen")
+
+        # codebook은 residual(encoder_output - f_hat_0) 분포로 새로 학습
+        # net.quantizer.codebook.copy_(hrv_model['quantizer.codebook'])
+        # net.quantizer.init = True
+        # net.quantizer.codebook_frozen = True
+        # print(f"[Stage 2] loaded HRVQVAE codebook → frozen")
+
+        decoder_state = {k[len('decoder.'):]: v
+                         for k, v in hrv_model.items() if k.startswith('decoder.')}
+        net.decoder.load_state_dict(decoder_state)
+        print(f"[Stage 2] loaded HRVQVAE decoder from {hrv_ckpt_path} → frozen")
+    else:
+        print("[Stage 2] hrv_ckpt_path not set → all components train from scratch")
+
+    # plugin align_proj_text 로드
+    plugin_ckpt_path = cfg.training.get('plugin_ckpt_path', None)
+    if plugin_ckpt_path:
+        plugin_ckpt = torch.load(plugin_ckpt_path, map_location=device)
+        net.align_proj_text.load_state_dict(plugin_ckpt['align_proj_text'])
+        print(f"[Stage 2] loaded plugin align_proj_text from {plugin_ckpt_path}")
+
+    # freeze: encoder, align projectors, seg_pool, vq, decoder, quantizer.quant_resi
+    # codebook만 EMA로 residual 분포에 수렴 (gradient 충돌 없음)
     for name, p in net.named_parameters():
         if any(name.startswith(k) for k in
                ['encoder', 'align_proj_motion', 'align_proj_text',
-                'seg_pool', 'vq']):
+                'seg_pool', 'vq', 'decoder', 'quantizer']):
             p.requires_grad = False
-        else:
-            p.requires_grad = True   # quantizer, decoder
 
     trainable = {n.split('.')[0] for n, p in net.named_parameters() if p.requires_grad}
     print(f"[Stage 2] trainable: {trainable}")
 
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, net.parameters()),
-        lr=cfg.training.lr, weight_decay=cfg.training.weight_decay
-    )
+    # quant_resi frozen이므로 optimizer 불필요 (codebook은 EMA buffer로 자동 업데이트)
+    # optimizer = torch.optim.AdamW(
+    #     filter(lambda p: p.requires_grad, net.parameters()),
+    #     lr=cfg.training.lr, weight_decay=cfg.training.weight_decay
+    # )
 
     best_val_loss = float('inf')
     global_step   = 0
@@ -150,10 +174,8 @@ if __name__ == '__main__':
             commit_loss_hrv_stable = commit_loss_hrv.clamp(max=5.0)
             loss = l_recon + net.lambda_commit_hrv * commit_loss_hrv_stable
 
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(net.parameters(), 0.5)
-            optimizer.step()
+            # quant_resi frozen → trainable params 없음, codebook은 EMA로 업데이트됨
+            # backward/optimizer step 불필요 (forward에서 EMA 자동 반영)
 
             ep_recon      += l_recon.item()
             ep_commit_hrv += commit_loss_hrv.item()
@@ -231,12 +253,10 @@ if __name__ == '__main__':
 
             if val_recon < best_val_loss:
                 best_val_loss = val_recon
-                torch.save({'epoch': epoch, 'model': net.state_dict(),
-                            'optimizer': optimizer.state_dict()},
-                           pjoin(ckpt_dir, 'stage2_best.tar'))
+                torch.save({'epoch': epoch, 'model': net.state_dict()},
+                           pjoin(ckpt_dir, f'{s2_name}_best.tar'))
                 print(f"  --> best saved (recon={val_recon:.4f})")
 
         if (epoch + 1) % cfg.training.save_every == 0:
-            torch.save({'epoch': epoch, 'model': net.state_dict(),
-                        'optimizer': optimizer.state_dict()},
-                       pjoin(ckpt_dir, f'stage2_ep{epoch+1:04d}.tar'))
+            torch.save({'epoch': epoch, 'model': net.state_dict()},
+                       pjoin(ckpt_dir, f'{s2_name}_ep{epoch+1:04d}.tar'))

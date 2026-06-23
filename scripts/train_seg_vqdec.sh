@@ -1,13 +1,13 @@
 #!/usr/bin/bash
 
-#SBATCH -J SegVQDec_S2
+#SBATCH -J SegVQDec_V3-3
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=29G
 #SBATCH -p batch_grad
-#SBATCH -w ariel-v3
+#SBATCH -w ariel-v2
 #SBATCH -t 2-0
-#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_seg_vqdec_s2.out
+#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_seg_vqdec_v3-3.out
 
 cd /nas2/data/dpfla3573/code/MoScale
 export PYTHONPATH=/nas2/data/dpfla3573/code/MoScale:$PYTHONPATH

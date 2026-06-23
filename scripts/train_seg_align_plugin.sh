@@ -7,7 +7,7 @@
 #SBATCH -p batch_grad
 #SBATCH -w ariel-v3
 #SBATCH -t 1-0
-#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_seg_align_plugin.out
+#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_seg_align_plugin_v3-1.out
 
 cd /nas2/data/dpfla3573/code/MoScale
 export PYTHONPATH=/nas2/data/dpfla3573/code/MoScale:$PYTHONPATH

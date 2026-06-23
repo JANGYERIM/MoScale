@@ -134,7 +134,7 @@ if __name__ == '__main__':
     hrv_cfg = load_config('checkpoint_dir/humanml3d/hrvqvae/T_VQ_V1/train_hrvqvae.yaml')
 
     ckpt_name = seg_cfg.training.get('plugin_ckpt_name', 'align_plugin_v1')
-    ckpt_dir  = pjoin(seg_cfg.exp.root_ckpt_dir, seg_cfg.data.name, 'seg_align_plugin')
+    ckpt_dir  = pjoin(seg_cfg.exp.root_ckpt_dir, seg_cfg.data.name, 'seg_align_plugin', seg_cfg.exp.name)
     os.makedirs(ckpt_dir, exist_ok=True)
 
     fixseed(seg_cfg.exp.seed)
@@ -172,7 +172,8 @@ if __name__ == '__main__':
                   activation=hrv_cfg.model.vq_act,
                   use_attn=hrv_cfg.model.use_attn).to(device)
 
-    hrv_ckpt_path = 'checkpoint_dir/humanml3d/hrvqvae/T_VQ_V1/model/net_best_fid.tar'
+    hrv_ckpt_path = seg_cfg.training.get('hrv_ckpt_path',
+                    'checkpoint_dir/humanml3d/hrvqvae/T_VQ_V1/model/net_best_fid.tar')
     hrv_ckpt = torch.load(hrv_ckpt_path, map_location=device)
     hrv.load_state_dict(hrv_ckpt['vq_model'])
     hrv.eval()
@@ -181,14 +182,14 @@ if __name__ == '__main__':
     print(f"[HRVQVAE] loaded & frozen: {hrv_ckpt_path}")
     down_t = hrv_cfg.model.down_t   # 2 → 4x downsample
 
-    # ── align projectors (standalone) ────────────────────────────────────────
-    align_dim = seg_cfg.model.get('align_dim', 256)
+    # ── align projector ───────────────────────────────────────────────────────
+    # motion: HRVQVAE encoder (pretrained) → temporal_seg_pool → 512-dim 그대로 사용 (projection 없음)
+    # text:   CLIP → align_proj_text → 512-dim (motion feature 공간으로 맵핑)
     latent_dim = hrv_cfg.quantizer.code_dim  # 512
     clip_dim   = seg_cfg.model.clip_dim      # 512
 
-    align_proj_motion = nn.Linear(latent_dim, align_dim).to(device)
-    align_proj_text   = nn.Linear(clip_dim,   align_dim).to(device)
-    print(f"align_proj_motion: {latent_dim}→{align_dim}  |  align_proj_text: {clip_dim}→{align_dim}")
+    align_proj_text = nn.Linear(clip_dim, latent_dim).to(device)
+    print(f"align_proj_text: {clip_dim}→{latent_dim}")
 
     # ── CLIP (last 2 layer fine-tune) ─────────────────────────────────────────
     clip_tokenizer  = CLIPTokenizer.from_pretrained(seg_cfg.model.clip_model)
@@ -219,19 +220,17 @@ if __name__ == '__main__':
     lr      = seg_cfg.training.lr
     lr_clip = seg_cfg.training.get('lr_clip', 1e-5)
     optimizer = torch.optim.AdamW([
-        {'params': list(align_proj_motion.parameters()) +
-                   list(align_proj_text.parameters()),  'lr': lr},
-        {'params': clip_trainable,                       'lr': lr_clip},
+        {'params': list(align_proj_text.parameters()), 'lr': lr},
+        {'params': clip_trainable,                      'lr': lr_clip},
     ], weight_decay=seg_cfg.training.weight_decay)
 
     num_epochs  = seg_cfg.training.get('plugin_epochs', seg_cfg.training.get('stage1_epochs', 100))
     global_step = 0
 
     for epoch in range(num_epochs):
-        align_proj_motion.train()
         align_proj_text.train()
         clip_text_model.train()
-        ep_loss, ep_steps = 0., 0
+        ep_loss, ep_cosim, ep_steps = 0., 0., 0
         log_cosim_this_epoch = (epoch % 20 == 0)
 
         for batch_idx, (motion, seg_texts, m_lens, seg_mask, n_valid) in enumerate(train_loader):
@@ -240,26 +239,27 @@ if __name__ == '__main__':
             m_lens   = m_lens.to(device).long()
             m_lens_down = m_lens // (2 ** down_t)
 
-            # m_i: HRVQVAE encoder (frozen, no_grad)
+            # m_i: HRVQVAE encoder → temporal_seg_pool → normalize (projection 없음)
             with torch.no_grad():
                 x_in = motion.permute(0, 2, 1).float()          # [B, 263, T]
                 feat = hrv.encoder(x_in, m_lens)                 # [B, 512, T/4]
                 feat = feat.permute(0, 2, 1)                     # [B, T/4, 512]
                 seg_feats = temporal_seg_pool(feat, seg_mask, m_lens_down)  # [B, N, 512]
+                B, N, _ = seg_feats.shape
+                flat_mask = seg_mask.reshape(B * N).bool()
+                vm = F.normalize(seg_feats.reshape(B*N, -1)[flat_mask], dim=-1)  # [V, 512]
 
-            # t_i: CLIP (gradient through last 2 layers)
+            # t_i: CLIP (gradient through last 2 layers) + align_proj_text
             seg_texts_list = [list(col) for col in zip(*seg_texts)]
             clip_embeds = encode_segments(clip_tokenizer, clip_text_model,
                                           seg_texts_list, device, clip_mean)  # [B, N, 512]
-
-            # projection → shared space
-            B, N, _ = seg_feats.shape
-            flat_mask = seg_mask.reshape(B * N).bool()
-
-            vm = F.normalize(align_proj_motion(seg_feats).reshape(B*N, -1)[flat_mask], dim=-1)
             vt = F.normalize(align_proj_text(clip_embeds).reshape(B*N, -1)[flat_mask], dim=-1)
 
-            # cosim logging (20에폭 주기, 첫 배치)
+            # (m_i, t_i) 쌍 cosine similarity (대각 평균)
+            with torch.no_grad():
+                cosim = (vm.detach() * vt.detach()).sum(-1).mean().item()
+
+            # cosim 상세 로그 (20에폭 주기, 첫 배치)
             if log_cosim_this_epoch and batch_idx == 0:
                 with torch.no_grad():
                     log_cosim(vm.detach(), vt.detach(), epoch, global_step, run)
@@ -270,27 +270,32 @@ if __name__ == '__main__':
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(
-                list(align_proj_motion.parameters()) +
                 list(align_proj_text.parameters()) + clip_trainable, 1.0)
             optimizer.step()
 
             ep_loss  += loss.item()
+            ep_cosim += cosim
             ep_steps += 1
-            print(f"[Plugin] Ep {epoch:03d} | step {global_step} | align {loss.item():.4f}")
+            print(f"[Plugin] Ep {epoch:03d} | step {global_step} | "
+                  f"align {loss.item():.4f} | cosim {cosim:.4f}")
 
             if global_step % seg_cfg.training.log_every == 0:
-                run.log({'plugin/align': loss.item(), 'epoch': epoch}, step=global_step)
+                run.log({'plugin/align': loss.item(),
+                         'plugin/cosim': cosim,
+                         'epoch': epoch}, step=global_step)
             global_step += 1
 
-        avg = ep_loss / ep_steps
-        print(f"\n[Plugin Ep {epoch:03d}] avg align {avg:.4f}\n")
-        run.log({'plugin/epoch_align': avg, 'epoch': epoch}, step=global_step)
+        avg_loss  = ep_loss  / ep_steps
+        avg_cosim = ep_cosim / ep_steps
+        print(f"\n[Plugin Ep {epoch:03d}] avg align {avg_loss:.4f} | avg cosim {avg_cosim:.4f}\n")
+        run.log({'plugin/epoch_align': avg_loss,
+                 'plugin/epoch_cosim': avg_cosim,
+                 'epoch': epoch}, step=global_step)
 
     # ── save ──────────────────────────────────────────────────────────────────
     save_path = pjoin(ckpt_dir, f'{ckpt_name}.tar')
     torch.save({
         'epoch':             num_epochs,
-        'align_proj_motion': align_proj_motion.state_dict(),
         'align_proj_text':   align_proj_text.state_dict(),
         'clip_last2_layers': [
             clip_text_model.text_model.encoder.layers[-2].state_dict(),
@@ -298,7 +303,7 @@ if __name__ == '__main__':
         ],
         'clip_final_layer_norm': clip_text_model.text_model.final_layer_norm.state_dict(),
         'hrv_ckpt_path':     hrv_ckpt_path,
-        'align_dim':         align_dim,
+        'latent_dim':        latent_dim,
     }, save_path)
     print(f"\n[Plugin 완료] saved → {save_path}")
     wandb.finish()

@@ -162,9 +162,8 @@ class SegVQVAE(nn.Module):
         )
         self.lambda_commit_hrv = cfg.training.get('lambda_commit_hrv', 0.02)
 
-        align_dim = cfg.model.get('align_dim', 256)
-        self.align_proj_motion = nn.Linear(latent_dim, align_dim)
-        self.align_proj_text   = nn.Linear(clip_dim, align_dim)
+        self.align_proj_motion = nn.Linear(latent_dim, latent_dim)
+        self.align_proj_text   = nn.Linear(clip_dim, latent_dim)
 
     def _temporal_seg_pool(self, feat, seg_mask, m_lens_down):
         """

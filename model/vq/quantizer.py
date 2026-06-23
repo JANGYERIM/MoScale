@@ -63,12 +63,14 @@ def gumbel_sample(
 
 
 class MSQuantizer(nn.Module):
-    def __init__(self, nb_code, code_dim, mu, scales, share_quant_resi=4, quant_resi=0.5):
+    def __init__(self, nb_code, code_dim, mu, scales, share_quant_resi=4, quant_resi=0.5,
+                 codebook_frozen=False):
         super(MSQuantizer, self).__init__()
         self.nb_code = nb_code
         self.code_dim = code_dim
         self.mu = mu  ##TO_DO
         self.scales = scales
+        self.codebook_frozen = codebook_frozen
         self.reset_codebook()
         self.quant_resi_ratio = quant_resi
         if share_quant_resi == 0:  # non-shared: \phi_{1 to K} for K scales
@@ -302,7 +304,7 @@ class MSQuantizer(nn.Module):
                 all_mask.append(rearrange(mask, 'n t -> (n t)'))
                 
             rest_down = rearrange(rest_down, 'n c t -> (n t) c')
-            if self.training and not self.init:
+            if self.training and not self.init and not self.codebook_frozen:
                 self.init_codebook(rest_down[all_mask[-1]])
             
             code_idx = self.quantize(rest_down, temperature)
@@ -334,13 +336,17 @@ class MSQuantizer(nn.Module):
             all_code_indices = all_code_indices[all_mask]
             all_rest_down = all_rest_down[all_mask]
 
-        if self.training:
+        if self.training and not self.codebook_frozen:
             perplexity = self.update_codebook(all_rest_down, all_code_indices)
         else:
             perplexity = self.compute_perplexity(all_code_indices)
 
         mean_vq_loss /= len(self.scales)
-        f_hat = x + (f_hat - x).detach()
+
+        # x가 grad를 요구할 때만 straight-through 적용 (encoder frozen이면 x.requires_grad=False)
+        # encoder frozen 시: straight-through 없이 f_hat 그대로 → quant_resi로 gradient 흐름
+        if x.requires_grad:
+            f_hat = x + (f_hat - x).detach()
 
         return f_hat, mean_vq_loss, perplexity
     
