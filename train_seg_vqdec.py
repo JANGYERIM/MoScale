@@ -21,10 +21,93 @@ from torch.utils.data import DataLoader
 
 from model.vq.seg_vqvae import SegVQVAE
 from dataset.seg_dataset import SegMotionDataset, seg_collate_fn
+from model.evaluator.hml.dataset_motion_loader import get_dataset_motion_loader
 from config.load_config import load_config
 from utils.get_opt import get_opt
 from utils.fixseeds import fixseed
+from utils.metrics import (calculate_frechet_distance, calculate_R_precision_gpu,
+                            euclidean_distance_matrix_gpu, calculate_activation_statistics_gpu,
+                            calculate_diversity_gpu)
 import wandb
+
+
+@torch.no_grad()
+def evaluate_seg_vqdec(net, eval_loader, eval_wrapper, ep, global_step, best_fid, device):
+    net.eval()
+    motion_annotation_list, motion_pred_list = [], []
+    R_prec_real = torch.zeros(3, device=device)
+    R_prec_pred = torch.zeros(3, device=device)
+    match_real = match_pred = nb_sample = 0.
+
+    dataset  = eval_loader.dataset
+    std_gpu  = torch.from_numpy(dataset.std).float().to(device)
+    mean_gpu = torch.from_numpy(dataset.mean).float().to(device)
+
+    for batch in eval_loader:
+        word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, _ = batch
+        motion   = motion.to(device)
+        m_length = m_length.to(device)
+        B = motion.shape[0]
+
+        # SegVQVAE forward: temporal_seg_pool으로 coarse → residual 양자화 → recon
+        m_lens_down = m_length // (2 ** net.down_t)
+        feat      = net.encode(motion, m_length)
+        T_down    = feat.shape[1]
+
+        # N=1 segment (full motion을 1개 segment로 취급)
+        seg_mask  = torch.ones(B, 1, dtype=torch.bool, device=device)
+        seg_feats = net._temporal_seg_pool(feat, seg_mask, m_lens_down)
+
+        f_hat_0 = F.interpolate(
+            seg_feats.permute(0, 2, 1), size=T_down, mode='linear', align_corners=False
+        )
+        pad_mask = torch.arange(T_down, device=device).unsqueeze(0) < m_lens_down.unsqueeze(1)
+        f_hat_0  = f_hat_0 * pad_mask.unsqueeze(1).float()
+
+        residual    = feat.permute(0, 2, 1) - f_hat_0
+        x_quantized, _, _ = net.quantizer(residual, temperature=0., m_lens=m_lens_down,
+                                           start_drop=0, quantize_dropout_prob=0.0)
+        x_recon = net.decoder(f_hat_0 + x_quantized, m_lens_down)
+
+        et,      em      = eval_wrapper.get_co_embeddings(word_embeddings, pos_one_hots, sent_len, motion,  m_length)
+        et_pred, em_pred = eval_wrapper.get_co_embeddings(word_embeddings, pos_one_hots, sent_len, x_recon, m_length)
+
+        motion_annotation_list.append(em)
+        motion_pred_list.append(em_pred)
+
+        R_prec_real += calculate_R_precision_gpu(et,      em,      top_k=3, sum_all=True)
+        R_prec_pred += calculate_R_precision_gpu(et_pred, em_pred, top_k=3, sum_all=True)
+        match_real  += euclidean_distance_matrix_gpu(et,      em     ).trace().item()
+        match_pred  += euclidean_distance_matrix_gpu(et_pred, em_pred).trace().item()
+        nb_sample   += B
+
+    em_all   = torch.cat(motion_annotation_list, dim=0)
+    pred_all = torch.cat(motion_pred_list,       dim=0)
+
+    gt_mu, gt_cov = calculate_activation_statistics_gpu(em_all)
+    mu,    cov    = calculate_activation_statistics_gpu(pred_all)
+    fid           = calculate_frechet_distance(gt_mu, gt_cov, mu, cov)
+    div_real      = calculate_diversity_gpu(em_all,   300 if nb_sample > 300 else 100)
+    div           = calculate_diversity_gpu(pred_all, 300 if nb_sample > 300 else 100)
+
+    top123_real = (R_prec_real / nb_sample).cpu().numpy()
+    top123      = (R_prec_pred / nb_sample).cpu().numpy()
+    match_real /= nb_sample
+    match_pred /= nb_sample
+
+    print(f"\n[Eval Ep {ep:03d}] FID {fid:.4f} | "
+          f"Top1 {top123[0]:.4f} Top2 {top123[1]:.4f} Top3 {top123[2]:.4f} | "
+          f"Div {div:.4f} | Match {match_pred:.4f}\n")
+
+    wandb.log({'eval/FID': fid, 'eval/Top1': top123[0], 'eval/Top2': top123[1],
+               'eval/Top3': top123[2], 'eval/Div': div, 'eval/Match': match_pred,
+               'epoch': ep}, step=global_step)
+
+    if fid < best_fid:
+        print(f"  --> FID improved: {best_fid:.4f} → {fid:.4f}")
+        best_fid = fid
+
+    return fid, top123[0], best_fid
 
 
 if __name__ == '__main__':
@@ -44,6 +127,11 @@ if __name__ == '__main__':
     std  = np.load(pjoin(wrapper_opt.meta_dir, 'std.npy'))
     wrapper_opt.motion_dir = pjoin(cfg.data.root_dir, 'new_joint_vecs')
     wrapper_opt.text_dir   = pjoin(cfg.data.root_dir, 'texts')
+
+    from model.evaluator.hml.t2m_eval_wrapper import EvaluatorModelWrapper
+    eval_wrapper = EvaluatorModelWrapper(wrapper_opt)
+    eval_loader, _ = get_dataset_motion_loader(dataset_opt_path, 32, 'test',
+                                               device=device, data_root=cfg.data.root_dir)
 
     train_dataset = SegMotionDataset(
         wrapper_opt, mean, std,
@@ -118,13 +206,14 @@ if __name__ == '__main__':
     # )
 
     best_val_loss = float('inf')
+    best_fid      = float('inf')
     global_step   = 0
 
     for epoch in range(cfg.training.num_epochs):
         net.train()
         net.encoder.eval()   # encoder는 항상 eval
 
-        ep_recon = ep_commit_hrv = ep_total = 0.
+        ep_recon = ep_commit_hrv = ep_total = ep_perplexity = 0.
         ep_steps = 0
 
         for motion, seg_texts, m_lens, seg_mask, n_valid in train_loader:
@@ -156,7 +245,7 @@ if __name__ == '__main__':
 
             # scale1~4: MSQuantizer on residual
             residual = feat.permute(0, 2, 1) - f_hat_0.detach()
-            x_quantized, commit_loss_hrv, _ = net.quantizer(
+            x_quantized, commit_loss_hrv, perplexity = net.quantizer(
                 residual, temperature=0.5, m_lens=m_lens_down,
                 start_drop=0, quantize_dropout_prob=0.0
             )
@@ -177,19 +266,22 @@ if __name__ == '__main__':
             # quant_resi frozen → trainable params 없음, codebook은 EMA로 업데이트됨
             # backward/optimizer step 불필요 (forward에서 EMA 자동 반영)
 
-            ep_recon      += l_recon.item()
-            ep_commit_hrv += commit_loss_hrv.item()
-            ep_total      += loss.item()
-            ep_steps      += 1
+            ep_recon        += l_recon.item()
+            ep_commit_hrv   += commit_loss_hrv.item()
+            ep_total        += loss.item()
+            ep_perplexity   += perplexity.item()
+            ep_steps        += 1
 
             print(f"[S2] Ep {epoch:03d} | step {global_step} | "
                   f"recon {l_recon.item():.4f} | "
-                  f"commit_hrv {commit_loss_hrv.item():.4f}")
+                  f"commit_hrv {commit_loss_hrv.item():.4f} | "
+                  f"ppl {perplexity.item():.1f}")
 
             if global_step % cfg.training.log_every == 0:
                 wandb.log({
-                    's2/recon':      l_recon.item(),
-                    's2/commit_hrv': commit_loss_hrv.item(),
+                    's2/recon':       l_recon.item(),
+                    's2/commit_hrv':  commit_loss_hrv.item(),
+                    's2/perplexity':  perplexity.item(),
                     'epoch': epoch,
                 }, step=global_step)
             global_step += 1
@@ -197,11 +289,13 @@ if __name__ == '__main__':
         print(f"\n[Stage2 Ep {epoch:03d}] "
               f"total {ep_total/ep_steps:.4f} | "
               f"recon {ep_recon/ep_steps:.4f} | "
-              f"commit_hrv {ep_commit_hrv/ep_steps:.4f}\n")
+              f"commit_hrv {ep_commit_hrv/ep_steps:.4f} | "
+              f"ppl {ep_perplexity/ep_steps:.1f}\n")
         wandb.log({
             's2/epoch_total':      ep_total      / ep_steps,
             's2/epoch_recon':      ep_recon      / ep_steps,
             's2/epoch_commit_hrv': ep_commit_hrv / ep_steps,
+            's2/epoch_perplexity': ep_perplexity / ep_steps,
             'epoch': epoch,
         }, step=global_step)
 
@@ -256,6 +350,14 @@ if __name__ == '__main__':
                 torch.save({'epoch': epoch, 'model': net.state_dict()},
                            pjoin(ckpt_dir, f'{s2_name}_best.tar'))
                 print(f"  --> best saved (recon={val_recon:.4f})")
+
+            # FID / R-Precision 평가
+            fid, top1, best_fid = evaluate_seg_vqdec(
+                net, eval_loader, eval_wrapper, epoch, global_step, best_fid, device
+            )
+            if fid == best_fid:
+                torch.save({'epoch': epoch, 'model': net.state_dict()},
+                           pjoin(ckpt_dir, f'{s2_name}_best_fid.tar'))
 
         if (epoch + 1) % cfg.training.save_every == 0:
             torch.save({'epoch': epoch, 'model': net.state_dict()},
