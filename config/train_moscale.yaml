@@ -1,7 +1,7 @@
 exp:
   root_ckpt_dir: './checkpoint_dir'
   root_log_dir: './log'
-  name: 'T_MS_V1'
+  name: 'SeCo_P1-1'
   device: 'cuda:0'
   seed: 10306
 

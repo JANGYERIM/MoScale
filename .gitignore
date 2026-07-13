@@ -17,3 +17,6 @@ glove/
 # Misc
 *.out
 *.err
+
+# Secrets
+run/.wandb_api_key
