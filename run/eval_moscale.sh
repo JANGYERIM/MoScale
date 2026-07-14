@@ -4,9 +4,9 @@
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=29G
 #SBATCH -p batch_grad
-#SBATCH -w ariel-v3
+#SBATCH -w ariel-v2
 #SBATCH -t 1-0
-#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_Eval_SeCo_P1-3.out
+#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_Eval_moscale(check).out
 
 
 cd /nas2/data/dpfla3573/code/MoScale
