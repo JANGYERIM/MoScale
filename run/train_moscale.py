@@ -11,7 +11,7 @@ from model.evaluator.hml.t2m_eval_wrapper import EvaluatorModelWrapper
 from model.evaluator.hml.dataset_motion_loader import get_dataset_motion_loader
 from model.transformer.moscale import MoScale
 from trainers.transformer_trainer import MoScaleTrainer
-from dataset.humanml3d_dataset import Text2MotionDataset
+from dataset.humanml3d_dataset import Text2MotionDatasetMultiCaption, multi_caption_collate_fn
 
 from config.load_config import load_config
 
@@ -140,13 +140,13 @@ if __name__ == "__main__":
     trainer = MoScaleTrainer(cfg, moscale, vq_model=vq_model, device=device)
 
 
-    train_dataset = Text2MotionDataset(wrapper_opt, mean, std, train_cid_split_file)
-    eval_dataset = Text2MotionDataset(wrapper_opt, mean, std, val_cid_split_file)
+    train_dataset = Text2MotionDatasetMultiCaption(wrapper_opt, mean, std, train_cid_split_file)
+    eval_dataset = Text2MotionDatasetMultiCaption(wrapper_opt, mean, std, val_cid_split_file)
 
     train_loader = DataLoader(train_dataset, batch_size=cfg.training.batch_size, drop_last=True, num_workers=8,
-                              shuffle=True, pin_memory=True)
+                              shuffle=True, pin_memory=True, collate_fn=multi_caption_collate_fn)
     val_loader = DataLoader(eval_dataset, batch_size=cfg.training.batch_size, drop_last=True, num_workers=8,
-                              shuffle=True, pin_memory=True)
+                              shuffle=True, pin_memory=True, collate_fn=multi_caption_collate_fn)
     
     eval_loader, _ = get_dataset_motion_loader(dataset_opt_path, 32, 'test', device=device, data_root=cfg.data.root_dir)
 

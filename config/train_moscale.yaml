@@ -1,7 +1,7 @@
 exp:
   root_ckpt_dir: './checkpoint_dir'
   root_log_dir: './log'
-  name: 'SeCo_P1-1'
+  name: 'SeCo_P1-3'
   device: 'cuda:0'
   seed: 10306
 
@@ -40,9 +40,9 @@ model:
 
 
 training:
-  batch_size: 64
+  batch_size: 32
   max_epoch: 250
-  early_stop_epoch: 120
+  early_stop_epoch: 200
   cond_drop_prob: 0.1
   perturb_rate: [0.0, 0.6]
   lr: 3.0e-4
@@ -59,3 +59,4 @@ training:
   wpe: 0.01
   wp: 10
   sample_level_times: [1, 2, 5, 10]
+  lambda_consistency: 1.0

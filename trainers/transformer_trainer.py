@@ -28,25 +28,31 @@ class MoScaleTrainer(BaseTrainer):
         self.device = device
         self.vq_model.eval()
 
+        self.lambda_consistency = cfg.training.get('lambda_consistency', 1.0)
+
         self.logger = SummaryWriter(cfg.exp.log_dir)
 
 
     def forward(self, batch_data, train=False):
 
-        conds, motion, m_lens = batch_data
+        conds, motion, m_lens, caption_mask = batch_data
         motion = motion.detach().float().to(self.device)
         m_lens = m_lens.detach().long().to(self.device)
+        caption_mask = caption_mask.to(self.device)
 
         conds = conds.to(self.device).float() if torch.is_tensor(conds) else conds
 
-        _loss, _pred_ids, _acc = self.moscale(motion, conds, m_lens, self.vq_model, train)
+        _loss, _pred_ids, _acc, _ce_loss, _consistency_loss, _debug_info = self.moscale(
+            motion, conds, m_lens, self.vq_model, train,
+            num_captions=caption_mask.shape[1], caption_mask=caption_mask,
+            lambda_consistency=self.lambda_consistency)
 
-        return _loss, _acc
+        return _loss, _acc, _ce_loss, _consistency_loss, _debug_info
 
     def update(self, batch_data):
-        loss, acc = self.forward(batch_data, train=True)
+        loss, acc, ce_loss, consistency_loss, debug_info = self.forward(batch_data, train=True)
         grad_norm, scale_log2 = self.opt_t2m_transformer.backward_clip_step(loss=loss, stepping=True)
-        return loss.item(), acc
+        return loss.item(), acc, ce_loss.item(), consistency_loss.item(), debug_info
 
     def save(self, file_name, ep):
         t2m_trans_state_dict = self.moscale.state_dict()
@@ -126,13 +132,19 @@ class MoScaleTrainer(BaseTrainer):
                                                             step_decay_steps=self.cfg.training.get('step_milestones', None),
                                                             step_decay_rate=self.cfg.training.get('step_gamma', 0.1))
 
-                loss, acc = self.update(batch)
+                loss, acc, ce_loss, consistency_loss, debug_info = self.update(batch)
                 logs['loss'] += loss
+                logs['ce_loss'] += ce_loss
+                logs['consistency_loss'] += consistency_loss
                 logs['acc'] += acc
                 logs['lr/min'] += min_tlr
                 logs['lr/max'] += max_tlr
                 logs['wd/min'] += min_twd
                 logs['wd/max'] += max_twd
+
+                for d in debug_info:
+                    top5 = ', '.join(f'{tok}:{p:.3f}' for tok, p in zip(d['top5_tokens'], d['top5_probs']))
+                    print(f"  [debug] it {it} pos {d['position']} gt={d['gt_token']} top5(token:prob)=[{top5}]")
 
                 if it % self.cfg.training.log_every == 0:
                     mean_loss = OrderedDict()
@@ -158,7 +170,7 @@ class MoScaleTrainer(BaseTrainer):
             val_acc = []
             with torch.no_grad():
                 for i, batch_data in enumerate(val_loader):
-                    loss, acc = self.forward(batch_data, train=True)
+                    loss, acc, _, _, _ = self.forward(batch_data, train=True)
                     val_loss.append(loss.item())
                     val_acc.append(acc)
 
@@ -185,7 +197,7 @@ class MoScaleTrainer(BaseTrainer):
             val_acc = []
             with torch.no_grad():
                 for i, batch_data in enumerate(val_loader):
-                    loss, acc = self.forward(batch_data, train=False)
+                    loss, acc, _, _, _ = self.forward(batch_data, train=False)
                     val_loss.append(loss.item())
                     val_acc.append(acc)
 

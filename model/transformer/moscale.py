@@ -468,9 +468,21 @@ class MoScale(nn.Module):
             x[mask] = 0.
             return x
 
-    def forward(self, motion, y, m_lens, vq_model, train=False):
+    def forward(self, motion, y, m_lens, vq_model, train=False, num_captions=1, caption_mask=None, lambda_consistency=0.0):
+        # `motion`/`m_lens` describe B unique motions. `y` holds B*num_captions captions,
+        # laid out motion-major (motion0's C captions, then motion1's C captions, ...) so that
+        # a plain `repeat_interleave(num_captions, dim=0)` on the motion side lines up with it.
+        # Motions have a variable number of real captions in the dataset; the caller pads every
+        # motion up to `num_captions` (= the batch's max caption count) and passes `caption_mask`
+        # [B, num_captions] (True = real caption, False = padding) so padded rows can be excluded
+        # from the loss instead of double-counting a duplicated caption.
         labels, x_BLC_wo_prefix, non_pad_mask, raw_features = self.preprocess_motion_for_training(motion, m_lens, vq_model, self.perturb_rate, train)
         B = x_BLC_wo_prefix.shape[0]
+        C = num_captions
+        BC = B * C
+
+        if caption_mask is None:
+            caption_mask = torch.ones(B, C, dtype=torch.bool, device=x_BLC_wo_prefix.device)
 
         with torch.no_grad():
             cond_embs, cond_att_mask = self.encode_text(y)
@@ -557,37 +569,111 @@ class MoScale(nn.Module):
         input_token_embeddings[x_ids == self.pad_id] = self.padded_token_embedding
         input_token_embeddings = self.token_dim_proj(input_token_embeddings)
 
+        # Motion/mask-derived tensors are computed once per motion (B); tile them to BC so
+        # every one of a motion's C captions is matched against the exact same masked positions.
         x_BLC_wo_prefix = self.input_process(x_BLC_wo_prefix)
-        x_BLC = torch.cat((sos.expand(B, self.first_l, -1), x_BLC_wo_prefix), dim=1)
+        x_BLC_wo_prefix = x_BLC_wo_prefix.repeat_interleave(C, dim=0)
+        x_BLC = torch.cat((sos.expand(BC, self.first_l, -1), x_BLC_wo_prefix), dim=1)
 
-        attn_bias = self.attn_bias_for_masking.repeat(B, 1, 1, 1)
+        attn_bias = self.attn_bias_for_masking.repeat(BC, 1, 1, 1)
 
         x_BLC = x_BLC.to(dtype=main_type)
         cond_BD_or_gss = cond_BD_or_gss.to(dtype=main_type)
         attn_bias = attn_bias.to(dtype=main_type)
 
+        input_token_embeddings = input_token_embeddings.repeat_interleave(C, dim=0)
         x_BLC_token = torch.cat((x_BLC, input_token_embeddings), dim=-1)
         x_BLC_token = self.latent_dim_proj(x_BLC_token)
 
         for block_i, b in enumerate(self.masked_blocks):
             if block_i == 0:
-                x_BLC_token[:, :self.first_l] = x_BLC_token[:, :self.first_l] + self.pos_start.expand(B, self.first_l, -1)
-                x_BLC_token = x_BLC_token + self.lvl_embed(self.lvl_1L[:, :self.L].expand(B, -1))
-            rope_batch = self.rope_base.repeat(B, 1, 1, 1, 1, 1, 1)
+                x_BLC_token[:, :self.first_l] = x_BLC_token[:, :self.first_l] + self.pos_start.expand(BC, self.first_l, -1)
+                x_BLC_token = x_BLC_token + self.lvl_embed(self.lvl_1L[:, :self.L].expand(BC, -1))
+            rope_batch = self.rope_base.repeat(BC, 1, 1, 1, 1, 1, 1)
             x_BLC_token = b(x=x_BLC_token, cond_BD=cond_BD_or_gss, attn_bias=attn_bias, ca_kv=ca_kv, rope_batch=rope_batch)
 
-        predict = self.get_logits(x_BLC_token.float(), cond_BD)
+        predict = self.get_logits(x_BLC_token.float(), cond_BD)   # [BC, L, V]
 
-        # Loss/acc calculation
+        # `labels` (GT + mask token) is motion-level (B, L) and caption-independent; tile it to
+        # match predict's BC rows (padded caption slots simply repeat the same GT/mask pattern).
+        labels = labels.repeat_interleave(C, dim=0)   # [BC, L]
+
+        V = predict.shape[-1]
         labels_flatten = labels.reshape(-1)
-        token_number = predict.shape[-1]
-        pred_flatten = predict.reshape(-1, token_number)
-        ce_loss = F.cross_entropy(pred_flatten, labels_flatten, ignore_index=self.mask_id)
+        pred_flatten = predict.reshape(-1, V)
         pred_id = pred_flatten.argmax(dim=1)
-        mask = labels_flatten.ne(self.mask_id)
-        acc = (pred_id == labels_flatten).masked_select(mask).float().mean().item()
+        row_is_real = caption_mask.reshape(-1)                                   # [BC]
+        valid_flat = labels_flatten.ne(self.mask_id) & row_is_real.repeat_interleave(ntokens)
+        acc = (pred_id == labels_flatten).masked_select(valid_flat).float().mean().item()
 
-        return ce_loss, pred_id, acc
+        ce_per_tok = F.cross_entropy(pred_flatten, labels_flatten, ignore_index=self.mask_id,
+                                      reduction='none').view(B, C, ntokens)
+        valid = labels.view(B, C, ntokens).ne(self.mask_id)   # [B, C, L], identical across C
+        n_valid_per_row = valid.sum(dim=2).clamp_min(1)         # [B, C]
+        real_count = caption_mask.sum(dim=1).clamp_min(1)         # [B]: actual captions per motion
+
+        # Average CE per real caption (row) first, then average those per-motion means across the
+        # batch -- padded caption slots (duplicated captions) are excluded so they aren't double-counted.
+        ce_per_row_mean = (ce_per_tok * valid).sum(dim=2) / n_valid_per_row     # [B, C]
+        ce_per_motion = (ce_per_row_mean * caption_mask.float()).sum(dim=1) / real_count
+        ce_loss = ce_per_motion.mean()
+
+        valid_b = valid[:, 0, :]                                # [B, L]
+        gt_id_BL = labels.view(B, C, ntokens)[:, 0, :]           # [B, L]
+        pred_id_BCL = pred_id.view(B, C, ntokens)
+        has_multi = (caption_mask.sum(dim=1) >= 2)               # [B]: motions with >=2 real captions
+
+        if has_multi.any():
+            # Padded slots must never affect "all wrong" / "all different" -- force them to look
+            # like a "wrong, non-blocking" prediction so the AND/distinct-count only sees real captions.
+            real_bc1 = caption_mask.unsqueeze(-1)                                          # [B, C, 1]
+            wrong = pred_id_BCL.ne(gt_id_BL.unsqueeze(1)) | ~real_bc1                       # [B, C, L]
+            all_wrong = wrong.all(dim=1)                                                     # [B, L]
+
+            # Count distinct predicted tokens among the *real* captions at each position (C is small).
+            distinct_count = torch.zeros(B, ntokens, device=predict.device)
+            for i in range(C):
+                real_i = caption_mask[:, i].unsqueeze(-1)                                    # [B, 1]
+                matches_prev = torch.zeros(B, ntokens, dtype=torch.bool, device=predict.device)
+                for j in range(i):
+                    real_j = caption_mask[:, j].unsqueeze(-1)
+                    matches_prev |= pred_id_BCL[:, i, :].eq(pred_id_BCL[:, j, :]) & real_j
+                distinct_count += ((~matches_prev) & real_i).float()
+            # 2 real captions: need both to differ. 3+ real captions: need >=3 distinct predictions.
+            per_motion_threshold = real_count.clamp(max=3).unsqueeze(-1)                     # [B, 1]
+            all_different = distinct_count >= per_motion_threshold
+
+            weight = all_wrong.float() * (1.0 + all_different.float())   # 0 / 1 / 2
+            weight = weight * valid_b.float() * has_multi.float().unsqueeze(-1)   # [B, L]
+
+            # Normalize by how many positions actually triggered the penalty, not by the total
+            # number of masked tokens -- otherwise motions with few triggered positions but many
+            # masked tokens would have their consistency signal diluted away to near zero.
+            ce_mean_over_real_captions = (ce_per_tok * caption_mask.unsqueeze(-1)).sum(dim=1) / real_count.unsqueeze(-1)  # [B, L]
+            num_triggered = weight.gt(0).float().sum(dim=1).clamp_min(1)                      # [B]
+            consistency_per_motion = (weight * ce_mean_over_real_captions).sum(dim=1) / num_triggered
+            consistency_loss = consistency_per_motion.mean()
+        else:
+            consistency_loss = ce_loss.new_zeros(())
+
+        loss = ce_loss + lambda_consistency * consistency_loss
+
+        # Debug view: for the first motion's first (always-real) caption, show the top-5
+        # predicted tokens + probabilities and the GT token at its first 2 masked positions.
+        with torch.no_grad():
+            sample_positions = valid_b[0].nonzero(as_tuple=True)[0][:2]
+            probs0 = F.softmax(predict[0].float(), dim=-1)   # [L, V] for motion 0 / caption 0
+            debug_info = []
+            for pos in sample_positions.tolist():
+                top5_prob, top5_id = probs0[pos].topk(5)
+                debug_info.append({
+                    'position': pos,
+                    'gt_token': labels[0, pos].item(),
+                    'top5_tokens': top5_id.tolist(),
+                    'top5_probs': top5_prob.tolist(),
+                })
+
+        return loss, pred_id, acc, ce_loss.detach(), consistency_loss.detach(), debug_info
 
     def extra_repr(self):
         return f'num_layers={self.num_layers}'

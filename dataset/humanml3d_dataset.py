@@ -264,3 +264,60 @@ class Text2MotionDataset(data.Dataset):
         assert length <= self.max_motion_length
         self.pointer = np.searchsorted(self.length_arr, length)
         print("Pointer Pointing at %d" % self.pointer)
+
+
+class Text2MotionDatasetMultiCaption(Text2MotionDataset):
+    """Like Text2MotionDataset, but returns *every* caption that exists for the
+    motion/mask-crop instead of a single randomly-chosen one -- used for the
+    multi-caption CE + consistency loss, which needs several captions to share
+    the exact same motion tokens and masked positions. The number of captions
+    varies per motion (however many the dataset actually has for that id); the
+    collate_fn pads to the batch's max and returns a mask marking real vs padded."""
+
+    def __getitem__(self, item):
+        idx = self.pointer + item
+        data = self.data_dict[self.name_list[idx]]
+        motion, m_length, text_list = data['motion'], data['length'], data['text']
+
+        captions = [t['caption'] for t in text_list]
+
+        if self.opt.unit_length < 10:
+            coin2 = np.random.choice(['single', 'single', 'double'])
+        else:
+            coin2 = 'single'
+
+        if coin2 == 'double':
+            m_length = (m_length // self.opt.unit_length - 1) * self.opt.unit_length
+        elif coin2 == 'single':
+            m_length = (m_length // self.opt.unit_length) * self.opt.unit_length
+        idx = random.randint(0, len(motion) - m_length)
+        motion = motion[idx:idx+m_length]
+
+        "Z Normalization"
+        motion = (motion - self.mean) / self.std
+
+        if m_length < self.max_motion_length:
+            motion = np.concatenate([motion,
+                                     np.zeros((self.max_motion_length - m_length, motion.shape[1]))
+                                     ], axis=0)
+        return captions, motion, m_length
+
+
+def multi_caption_collate_fn(batch):
+    """Flattens the (captions, motion, m_length) batch into motion-major caption
+    order [motion0_cap0, motion0_cap1, ..., motion1_cap0, ...] so it lines up with
+    `repeat_interleave(num_captions, dim=0)` on the motion side in MoScale.forward.
+    Motions have a variable number of real captions, so every motion is padded up
+    to the batch's max caption count (by repeating its own first caption) and a
+    `caption_mask` [B, C_max] marks which slots are real vs padding."""
+    C_max = max(len(captions) for captions, _, _ in batch)
+
+    captions_flat = []
+    caption_mask = torch.zeros(len(batch), C_max, dtype=torch.bool)
+    for b, (captions, _, _) in enumerate(batch):
+        caption_mask[b, :len(captions)] = True
+        captions_flat.extend(captions + [captions[0]] * (C_max - len(captions)))
+
+    motions = torch.from_numpy(np.stack([item[1] for item in batch], axis=0)).float()
+    m_lengths = torch.tensor([item[2] for item in batch], dtype=torch.long)
+    return captions_flat, motions, m_lengths, caption_mask
