@@ -1,0 +1,54 @@
+exp:
+  root_ckpt_dir: './checkpoint_dir'
+  root_log_dir: './log'
+  name: 'FLOWDEC_P1-1'
+  device: 'cuda:0'
+  seed: 10306
+
+vq_name: "hrvqvae"
+vq_ckpt: "net_best_fid.tar"
+
+
+data:
+  name: 'humanml3d'
+  unit_length: 4
+  root_dir: '/nas2/data/dpfla3573/code/MoScale/dataset/HumanML3D'
+  joint_num: 22
+  dim_pose: 263
+  fps: 20
+  max_motion_length: 196
+  max_text_length: 20
+
+
+model:
+  backbone: 'unet1d'
+  unet1d:
+    dim: 512
+    dim_mults: [1, 2]
+    resnet_per_block: 1
+    c_proj_dim: 256
+    up_conv_c: 'Repeat_and_stack_and_linear'
+    dropout: 0.0
+    use_attention: False
+    attn_dim_head: 32
+    attn_heads: 4
+    learned_sinusoidal_cond: False
+    random_fourier_features: False
+    learned_sinusoidal_dim: 16
+    sinusoidal_pos_emb_theta: 10000
+
+
+training:
+  gpu_ids: [0]  # nn.DataParallel device ids; single-GPU if omitted/length 1
+  batch_size: 768
+  val_batch_size: 512
+  max_epoch: 200
+  lr: 5.0e-4
+  min_lr: 1.0e-5
+  scheduler: 'cosine_warmup'
+  ema_rate: 0.999
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  log_every: 10
+  eval_every_e: 5
+  ode_steps: 16

@@ -25,6 +25,7 @@ dependencies:
     - numpy
     - scipy==1.10.1
     - einops==0.8.0
+    - torchdiffeq==0.2.5
 
     # Visualization
     - matplotlib==3.4.3

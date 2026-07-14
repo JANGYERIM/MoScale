@@ -368,6 +368,137 @@ def evaluation_vqvae(out_dir, val_loader, net, writer, ep, acc_iter, best_fid, b
 
 
 @torch.no_grad()
+def evaluation_flow_decoder(out_dir, val_loader, flow_model, vq_model, cfg, writer, ep, acc_iter,
+                             best_fid, best_mpjpe, eval_wrapper, save=True, draw=True):
+    """Same metric suite as evaluation_vqvae, but motion is reconstructed by ODE-sampling the
+    rectified-flow decoder (conditioned on the frozen HRVQVAE's quantized latent) instead of
+    the deterministic HRVQVAE decoder."""
+    flow_model.eval()
+    vq_model.eval()
+    device = next(flow_model.parameters()).device
+
+    motion_annotation_list = []
+    motion_pred_list = []
+
+    R_precision_real = torch.zeros(3, device=device)
+    R_precision = torch.zeros(3, device=device)
+
+    nb_sample = 0
+    matching_score_real = 0.0
+    matching_score_pred = 0.0
+    mpjpe_sum = torch.tensor(0.0, device=device)
+    num_poses = 0
+
+    dataset = val_loader.dataset
+    std_gpu = torch.from_numpy(dataset.std).float().to(device)
+    mean_gpu = torch.from_numpy(dataset.mean).float().to(device)
+
+    for batch in val_loader:
+        word_embeddings, pos_one_hots, caption, sent_len, motion, m_length, token = batch
+
+        motion = motion.to(device)
+        m_length = m_length.to(device)
+        et, em = eval_wrapper.get_co_embeddings(word_embeddings, pos_one_hots, sent_len, motion, m_length)
+        bs, seq = motion.shape[0], motion.shape[1]
+
+        z = vq_model.get_quantized_latent(motion[..., :cfg.data.dim_pose], m_length.clone())
+        z = z.permute(0, 2, 1)
+        padding_mask = ~length_to_mask(m_length, seq, device=device)
+        pred_pose_eval = flow_model.sample(y=z, batch_size=bs, steps=cfg.training.ode_steps,
+                                            padding_mask=padding_mask, data_shape=(seq, cfg.data.dim_pose))
+
+        all_gt_motions = (motion.detach() * std_gpu + mean_gpu).float()
+        all_pred_motions = (pred_pose_eval.detach() * std_gpu + mean_gpu).float()
+        all_gt_joints = recover_from_ric(all_gt_motions, 22)
+        all_pred_joints = recover_from_ric(all_pred_motions, 22)
+        mask = length_to_mask(m_length, motion.shape[1], device=device)
+
+        mpjpe_sum += calculate_mpjpe_batch(all_gt_joints, all_pred_joints, mask)[0][mask].sum()
+        num_poses += mask.sum().item()
+
+        et_pred, em_pred = eval_wrapper.get_co_embeddings(word_embeddings, pos_one_hots, sent_len, pred_pose_eval,
+                                                          m_length)
+
+        motion_pred_list.append(em_pred)
+        motion_annotation_list.append(em)
+
+        temp_R = calculate_R_precision_gpu(et, em, top_k=3, sum_all=True)
+        temp_match = euclidean_distance_matrix_gpu(et, em).trace()
+        R_precision_real += temp_R
+        matching_score_real += temp_match.item()
+
+        temp_R = calculate_R_precision_gpu(et_pred, em_pred, top_k=3, sum_all=True)
+        temp_match = euclidean_distance_matrix_gpu(et_pred, em_pred).trace()
+        R_precision += temp_R
+        matching_score_pred += temp_match.item()
+
+        nb_sample += bs
+
+    motion_annotation_gpu = torch.cat(motion_annotation_list, dim=0)
+    motion_pred_gpu = torch.cat(motion_pred_list, dim=0)
+
+    gt_mu, gt_cov = calculate_activation_statistics_gpu(motion_annotation_gpu)
+    mu, cov = calculate_activation_statistics_gpu(motion_pred_gpu)
+
+    diversity_real = calculate_diversity_gpu(motion_annotation_gpu, 300 if nb_sample > 300 else 100)
+    diversity = calculate_diversity_gpu(motion_pred_gpu, 300 if nb_sample > 300 else 100)
+
+    R_precision_real = (R_precision_real / nb_sample).cpu().numpy()
+    R_precision = (R_precision / nb_sample).cpu().numpy()
+    mpjpe = (mpjpe_sum / num_poses).item() * 100
+
+    matching_score_real = matching_score_real / nb_sample
+    matching_score_pred = matching_score_pred / nb_sample
+
+    fid = calculate_frechet_distance(gt_mu, gt_cov, mu, cov)
+
+    msg = "--> \t Eva. Ep %d:, mpjpe. %.4f, FID. %.4f, Diversity Real. %.4f, Diversity. %.4f, R_precision_real. (%.4f, %.4f, %.4f), R_precision. (%.4f, %.4f, %.4f), matching_score_real. %.4f, matching_score_pred. %.4f" % \
+          (ep, mpjpe, fid, diversity_real, diversity, R_precision_real[0], R_precision_real[1], R_precision_real[2],
+           R_precision[0], R_precision[1], R_precision[2], matching_score_real, matching_score_pred)
+    print(msg)
+
+    if draw:
+        writer.add_scalar('./Test/FID', fid, ep)
+        writer.add_scalar('./Test/mpjpe', mpjpe, ep)
+        writer.add_scalar('./Test/Diversity', diversity, ep)
+        writer.add_scalar('./Test/top1', R_precision[0], ep)
+        writer.add_scalar('./Test/top2', R_precision[1], ep)
+        writer.add_scalar('./Test/top3', R_precision[2], ep)
+        writer.add_scalar('./Test/matching_score', matching_score_pred, ep)
+
+        wandb.log(
+            {
+                "Eval/FID": fid,
+                "Eval/mpjpe": mpjpe,
+                "Eval/Diversity": diversity,
+                "Eval/top1": R_precision[0],
+                "Eval/top2": R_precision[1],
+                "Eval/top3": R_precision[2],
+                "Eval/matching_score": matching_score_pred,
+                "Eval/epoch": ep,
+            },
+            step=acc_iter
+        )
+
+    if fid < best_fid:
+        msg = "--> --> \t FID Improved from %.5f to %.5f !!!" % (best_fid, fid)
+        if draw: print(msg)
+        best_fid = fid
+        if save:
+            torch.save({'flow_model': flow_model.state_dict(), 'ep': ep}, os.path.join(out_dir, 'net_best_fid.tar'))
+
+    if mpjpe < best_mpjpe:
+        msg = "--> --> \t mpjpe Improved from %.5f to %.5f !!!" % (best_mpjpe, mpjpe)
+        if draw: print(msg)
+        best_mpjpe = mpjpe
+        if save:
+            torch.save({'flow_model': flow_model.state_dict(), 'ep': ep}, os.path.join(out_dir, 'net_best_mpjpe.tar'))
+
+    flow_model.train()
+    return fid, mpjpe
+
+
+@torch.no_grad()
 def evaluation_moscale_transformer(out_dir, val_loader, trans, vq_model, writer, ep, acc_iters, best_fid, best_div,
                            best_top1, best_top2, best_top3, best_matching, eval_wrapper,device, plot_func,
                            cond_scale=4, save_ckpt=False, save_anim=False):

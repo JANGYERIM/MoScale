@@ -77,6 +77,27 @@ class HRVQVAE(nn.Module):
 
         return code_idx, all_codes, accumulated_fhat
 
+    def get_quantized_latent(self, x, m_lens=None):
+        """Encode + quantize without decoding: the continuous latent `z` (B, code_dim, T)
+        that `self.decoder(...)` normally consumes. Used to condition the rectified-flow
+        decoder (model/flow_decoder/) in place of the deterministic decoder."""
+        x_in = self.preprocess(x)
+        x_encoder = self.encoder(x_in, m_lens)
+
+        if m_lens is not None:
+            m_lens = m_lens // 2**self.down_t
+        x_quantized, _, _ = self.quantizer(x_encoder, temperature=0.5,
+                                            m_lens=m_lens,
+                                            start_drop=self.cfg.quantizer.start_drop,
+                                            quantize_dropout_prob=self.cfg.quantizer.quantize_dropout_prob)
+
+        if m_lens is not None:
+            x_quantized = x_quantized.permute(0, 2, 1)
+            mask = length_to_mask(m_lens, x_quantized.shape[1])
+            x_quantized[~mask] = 0
+            x_quantized = x_quantized.permute(0, 2, 1)
+        return x_quantized
+
     def forward(self, x, m_lengths=None):
         x_in = self.preprocess(x)
         # Encode
@@ -85,7 +106,7 @@ class HRVQVAE(nn.Module):
         if m_lengths is not None:
             m_lengths //= 2**self.down_t
         ## quantization
-        x_quantized, commit_loss, perplexity = self.quantizer(x_encoder, temperature=0.5, 
+        x_quantized, commit_loss, perplexity = self.quantizer(x_encoder, temperature=0.5,
                                                               m_lens=m_lengths,
                                                               start_drop=self.cfg.quantizer.start_drop,
                                                               quantize_dropout_prob=self.cfg.quantizer.quantize_dropout_prob)  # maximum m_lengths is 49
