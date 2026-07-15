@@ -14,6 +14,9 @@ wandb.txt
 dataset/
 glove/
 
+# Secrets
+run/.wandb_api_key
+
 # Misc
 *.out
 *.err
