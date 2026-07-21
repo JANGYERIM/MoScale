@@ -2,7 +2,7 @@ root_ckpt_dir: './checkpoint_dir'
 device: 'cuda:0'
 seed: 10010
 
-moscale_name: 'moscale'  # set to your trained MoScale experiment name (exp.name in train_moscale.yaml)
+moscale_name: 'SeCo_P1-2'  # set to your trained MoScale experiment name (exp.name in train_moscale.yaml)
 which_epoch: 'net_best_fid.tar'
 ext: 'test'
 
