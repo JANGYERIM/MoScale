@@ -319,7 +319,15 @@ class MoScale(nn.Module):
             model_max_length=cfg.data.max_text_length
         )
 
+        # Sized for batch_size=32 (x2 for CFG) -- every eval script in this repo uses that, but
+        # bulk precompute callers (e.g. dataset/predicted_token_dataset.py) may ask for more;
+        # `_get_infer_rope_base` grows this on demand instead of silently truncating.
         self.infer_rope_base = self.rope_base.repeat(64, 1, 1, 1, 1, 1, 1)
+
+    def _get_infer_rope_base(self, needed_batch):
+        if needed_batch > self.infer_rope_base.shape[0]:
+            self.infer_rope_base = self.rope_base.repeat(needed_batch, 1, 1, 1, 1, 1, 1)
+        return self.infer_rope_base
 
 
     def init_weights(self, init_adaln=0.5, init_adaln_gamma=1e-5, init_head=0.02, init_std=-1, conv_std_or_gain=0.02):
@@ -596,7 +604,7 @@ class MoScale(nn.Module):
     @eval_decorator
     def generate(self, conds, m_lens, cond_scale,
                  temperature=1, top_p_thres=0.9,
-                 vq_model=None, sample_time=None):
+                 vq_model=None, sample_time=None, top_k=0):
 
         if sample_time is not None:
             self.sample_level_times = sample_time
@@ -717,7 +725,7 @@ class MoScale(nn.Module):
 
                 x_out_token[:, :self.first_l] = x_out_token[:, :self.first_l] + self.pos_start.expand(2*B, self.first_l, -1)
                 x_out_token = x_out_token + self.lvl_embed(self.lvl_1L[:, :cur_L].expand(2*B, -1))
-                rope_batch = self.infer_rope_base[:x_out_token.shape[0], ..., :cur_L, :]
+                rope_batch = self._get_infer_rope_base(x_out_token.shape[0])[:x_out_token.shape[0], ..., :cur_L, :]
 
                 prefix_len = cur_L - pl
 
@@ -746,7 +754,7 @@ class MoScale(nn.Module):
                 logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
                 logits_BlV = logits_BlV[:, -pl:, :]
 
-                pred_ids = sample_with_top_k_top_p_(logits_BlV, rng=self.rng, top_k=0, top_p=top_p_thres, num_samples=1, temperature=temperature)[:, :, 0]
+                pred_ids = sample_with_top_k_top_p_(logits_BlV, rng=self.rng, top_k=top_k, top_p=top_p_thres, num_samples=1, temperature=temperature)[:, :, 0]
                 ids = torch.where(is_mask, pred_ids, ids)
 
                 probs_without_temperature = logits_BlV.softmax(dim=-1)
@@ -938,7 +946,7 @@ class MoScale(nn.Module):
                     + self.pos_start.expand(2 * B, self.first_l, -1))
                 x_out_token = x_out_token + self.lvl_embed(
                     self.lvl_1L[:, :cur_L].expand(2 * B, -1))
-                rope_batch = self.infer_rope_base[:x_out_token.shape[0], ..., :cur_L, :]
+                rope_batch = self._get_infer_rope_base(x_out_token.shape[0])[:x_out_token.shape[0], ..., :cur_L, :]
 
                 for b in self.masked_blocks:
                     x_out_token = b(x=x_out_token, cond_BD=cond_BD_or_gss,

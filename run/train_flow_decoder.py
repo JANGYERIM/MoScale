@@ -11,7 +11,7 @@ import wandb
 from torch.utils.data import DataLoader
 
 from config.load_config import load_config
-from dataset.humanml3d_dataset import Text2MotionDataset
+from dataset.humanml3d_dataset import MotionWindowDataset
 from model.evaluator.hml.dataset_motion_loader import get_dataset_motion_loader
 from model.evaluator.hml.t2m_eval_wrapper import EvaluatorModelWrapper
 from model.flow_decoder.rectified_flow import RectifiedFlowDecoder
@@ -50,7 +50,8 @@ if __name__ == "__main__":
     cfg = load_config('config/train_flow_decoder.yaml')
     cfg.exp.checkpoint_dir = pjoin(cfg.exp.root_ckpt_dir, cfg.data.name, 'flow_decoder', cfg.exp.name)
 
-    wandb.init(project="snap-Trans-hml-local", dir=cfg.exp.checkpoint_dir, config=dict(cfg), name=cfg.exp.name)
+    wandb.init(project=cfg.exp.get('wandb_project', 'snap-Trans-hml-local'), dir=cfg.exp.checkpoint_dir,
+               config=dict(cfg), name=cfg.exp.name)
 
     os.makedirs(cfg.exp.checkpoint_dir, exist_ok=True)
     shutil.copy('config/train_flow_decoder.yaml', cfg.exp.checkpoint_dir)
@@ -110,8 +111,9 @@ if __name__ == "__main__":
 
     trainer = FlowDecoderTrainer(cfg, flow_model, vq_model=vq_model, device=device)
 
-    train_dataset = Text2MotionDataset(wrapper_opt, mean, std, train_cid_split_file)
-    eval_dataset = Text2MotionDataset(wrapper_opt, mean, std, val_cid_split_file)
+    window_size = cfg.data.get('window_size', 64)
+    train_dataset = MotionWindowDataset(wrapper_opt, mean, std, train_cid_split_file, window_size=window_size)
+    eval_dataset = MotionWindowDataset(wrapper_opt, mean, std, val_cid_split_file, window_size=window_size)
 
     train_loader = DataLoader(train_dataset, batch_size=cfg.training.batch_size, drop_last=True, num_workers=8,
                               shuffle=True, pin_memory=True)

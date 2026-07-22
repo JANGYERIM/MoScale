@@ -112,6 +112,24 @@ Configuration: `config/edit.yaml`. Set `source_motion` to your source motion `.n
 - [x] Release editing code
 
 
+## 💡 Idea Note (2026-07-16): Exposure-Bias-Aware Flow Decoder Training
+
+Status: proposal / not yet implemented. Written down while comparing this project's flow decoder (`model/flow_decoder/`, `trainers/flow_decoder_trainer.py`, `config/train_flow_decoder.yaml`) against DisCoRD's RF decoder design.
+
+**Problem.** The flow decoder is currently trained only on latents `z` derived from *ground-truth* tokens (encode GT motion → HRVQVAE codes → z → train `flow(gt_motion, z)`). At real inference, Stage-2 (the MoScale Transformer) sometimes predicts tokens that are positionally right but semantically different from GT (it captures context more than the exact code identity). Decoding those inference-time token sequences therefore drifts from GT motion — the decoder never saw this kind of error during training (classic **exposure bias** / train-inference mismatch, not something "consistency flow matching" addresses — that trick only enforces self-consistency along a single ODE trajectory for few-step sampling, unrelated to this).
+
+**Proposed directions:**
+
+1. **Text-conditioned decoder.** Feed the caption embedding into the flow decoder alongside `z` (both backbones already support a conditioning hook — `unet1d_backbone.py` / `dit_backbone.py` — so this is a moderate extension, not a redesign). Intuition: when `z` is corrupted by a token-prediction error, text can act as an anchor toward the intended motion. Caveat: `z` already carries most of the content, so the marginal value of text needs to be ablated (`z` only vs `z + text`).
+
+2. **Train on actual/simulated inference-time tokens, not just GT tokens.** Run Stage-2 (MoScale Transformer) to get predicted token sequences → predicted `z'` → supervise `flow(gt_motion, z')` toward the *same* GT motion. This is standard **scheduled sampling / exposure-bias mitigation** (Bengio et al. 2015 family), not "consistency" in the flow-matching sense. Practical notes:
+   - Generating predicted tokens on-the-fly every training step is expensive (Stage-2 decoding is iterative); precompute/cache predicted-`z` offline per (motion, caption) and mix with GT-`z` pairs (curriculum ratio, not 100% predicted from the start).
+   - Risk: forcing convergence to the exact GT motion for every corrupted `z'` may over-constrain if some prediction "errors" are actually plausible alternative motions rather than pure noise.
+
+3. **Multi-caption invariance.** HumanML3D provides multiple rephrased captions per motion. Idea: predicted tokens from caption A, B, C (same underlying motion, different rephrasings) will differ slightly from each other and from GT — train the decoder so all three map back to the *same* GT motion. This is a conditional-invariance / robustness objective (closer to denoising-autoencoder style training than to Consistency Flow Matching, which is about trajectory self-consistency, not multi-condition-to-same-target). Since one GT motion already has several caption/token variants available, this needs no new data collection, only precomputing predicted tokens per caption.
+
+Net effect of (2)+(3): the decoder should learn to extract the invariant "identity" signal from `z` and text while ignoring the token-level noise introduced by Stage-2's imperfect prediction — directly targeting the FID gap between reconstruction-from-GT-tokens and generation-from-predicted-tokens.
+
 ## 🙏 Acknowledgements
 
 The code is built upon open-source projects including [MoMask++](https://github.com/snap-research/SnapMoGen) and [VAR](https://github.com/FoundationVision/VAR). We thank the authors for their helpful code.

@@ -264,3 +264,53 @@ class Text2MotionDataset(data.Dataset):
         assert length <= self.max_motion_length
         self.pointer = np.searchsorted(self.length_arr, length)
         print("Pointer Pointing at %d" % self.pointer)
+
+
+class MotionWindowDataset(data.Dataset):
+    """Dense sliding-window sampler: every valid frame offset in every training clip is a
+    separate fixed-length window. Mirrors DisCoRD's `datasets/t2m_dataset.py::MotionDataset`
+    (one sample per clip) so the flow decoder trains on the same data regime/density in both
+    codebases -- Text2MotionDataset above instead yields one (variable-length, padded) sample
+    per clip, which is far sparser per epoch."""
+
+    def __init__(self, opt, mean, std, split_file, window_size=64):
+        self.window_size = window_size
+        self.data = []
+        self.lengths = []
+        id_list = []
+        with cs.open(split_file, 'r') as f:
+            for line in f.readlines():
+                id_list.append(line.strip())
+
+        for name in tqdm(id_list):
+            try:
+                motion = np.load(pjoin(opt.motion_dir, name + '.npy'))
+                if motion.shape[0] < window_size:
+                    continue
+                self.lengths.append(motion.shape[0] - window_size)
+                self.data.append(motion)
+            except Exception as e:
+                print(e)
+                pass
+
+        self.cumsum = np.cumsum([0] + self.lengths)
+        self.mean = mean
+        self.std = std
+        print("Total number of motions {}, windows {}".format(len(self.data), self.cumsum[-1]))
+
+    def inv_transform(self, data):
+        return data * self.std + self.mean
+
+    def __len__(self):
+        return self.cumsum[-1]
+
+    def __getitem__(self, item):
+        if item != 0:
+            motion_id = np.searchsorted(self.cumsum, item) - 1
+            idx = item - self.cumsum[motion_id] - 1
+        else:
+            motion_id = 0
+            idx = 0
+        motion = self.data[motion_id][idx:idx + self.window_size]
+        motion = (motion - self.mean) / self.std
+        return "", motion, self.window_size

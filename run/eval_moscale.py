@@ -1,4 +1,5 @@
 
+import glob
 import os
 from os.path import join as pjoin
 
@@ -10,6 +11,8 @@ from model.evaluator.hml.t2m_eval_wrapper import EvaluatorModelWrapper
 from model.evaluator.hml.dataset_motion_loader import get_dataset_motion_loader
 
 from model.transformer.moscale import MoScale
+from model.flow_decoder.rectified_flow import RectifiedFlowDecoder
+from model.flow_decoder.unet1d_backbone import Unet1DforFlowDecoder
 
 from config.load_config import load_config
 
@@ -17,6 +20,7 @@ import utils.eval_t2m as eval_t2m
 from utils.fixseeds import fixseed
 from utils.get_opt import get_opt
 
+import argparse
 import numpy as np
 import time
 
@@ -68,8 +72,54 @@ def load_trans_model(t2m_cfg, which_model, device):
     return moscale
 
 
+def load_flow_decoder(flow_cfg, vq_cfg, ckpt_name, device):
+    """Rebuild the rectified-flow decoder from its own saved train_flow_decoder.yaml and load
+    one of its checkpoints (net_best_fid.tar / net_best_mpjpe.tar). Used to decode MoScale's
+    predicted token ids in place of HRVQVAE's own deterministic decoder."""
+    u = flow_cfg.model.unet1d
+    denoiser = Unet1DforFlowDecoder(
+        dim=u.dim,
+        dim_mults=u.dim_mults,
+        resnet_per_block=u.resnet_per_block,
+        c_in_dim=vq_cfg.quantizer.code_dim,
+        c_proj_dim=u.c_proj_dim,
+        up_conv_c=u.up_conv_c,
+        channels=flow_cfg.data.dim_pose,
+        dropout=u.dropout,
+        use_attention=u.use_attention,
+        learned_sinusoidal_cond=u.learned_sinusoidal_cond,
+        random_fourier_features=u.random_fourier_features,
+        learned_sinusoidal_dim=u.learned_sinusoidal_dim,
+        sinusoidal_pos_emb_theta=u.sinusoidal_pos_emb_theta,
+        attn_dim_head=u.attn_dim_head,
+        attn_heads=u.attn_heads,
+    )
+    flow_model = RectifiedFlowDecoder(model=denoiser)
+
+    ckpt_path = pjoin(flow_cfg.exp.root_ckpt_dir, flow_cfg.data.name, 'flow_decoder', flow_cfg.exp.name, 'model', ckpt_name)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+    flow_model.load_state_dict(ckpt['flow_model'])
+    flow_model.to(device)
+    flow_model.eval()
+    print(f'Loading flow decoder {flow_cfg.exp.name} from epoch {ckpt["ep"]} ({ckpt_name})')
+    print(f'Loading flow decoder {flow_cfg.exp.name} from epoch {ckpt["ep"]} ({ckpt_name})', file=f, flush=True)
+    return flow_model
+
+
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--flow_decoder_name', type=str, default=None,
+                         help='overrides cfg.flow_decoder_name; set to decode MoScale-predicted tokens '
+                              'with a trained flow decoder instead of HRVQVAE\'s own decoder')
+    parser.add_argument('--flow_decoder_ckpt', type=str, default=None, help='overrides cfg.flow_decoder_ckpt')
+    args = parser.parse_args()
+
     cfg = load_config("./config/eval_moscale.yaml")
+    if args.flow_decoder_name is not None:
+        cfg.flow_decoder_name = args.flow_decoder_name
+    if args.flow_decoder_ckpt is not None:
+        cfg.flow_decoder_ckpt = args.flow_decoder_ckpt
+
     fixseed(cfg.seed)
 
     if cfg.device != 'cpu':
@@ -83,7 +133,12 @@ if __name__ == '__main__':
 
     os.makedirs(cfg.eval_dir, exist_ok=True)
 
-    out_path = pjoin(cfg.eval_dir, "%s.log"%cfg.ext)
+    use_flow_decoder = bool(cfg.get('flow_decoder_name'))
+    if use_flow_decoder:
+        ckpt_stem = os.path.splitext(cfg.flow_decoder_ckpt)[0]
+        out_path = pjoin(cfg.eval_dir, f"{cfg.ext}_flowdec_{cfg.flow_decoder_name}_{ckpt_stem}.log")
+    else:
+        out_path = pjoin(cfg.eval_dir, "%s.log" % cfg.ext)
 
     f = open(pjoin(out_path), 'w')
 
@@ -93,6 +148,17 @@ if __name__ == '__main__':
     moscale_cfg.vq = vq_cfg.quantizer
 
     vq_model = load_vq_model(vq_cfg, device)
+
+    flow_model = None
+    if use_flow_decoder:
+        flow_dir = pjoin(cfg.root_ckpt_dir, cfg.data.name, 'flow_decoder', cfg.flow_decoder_name)
+        # Different train_flow_decoder*.py variants (e.g. train_flow_decoder.py vs
+        # train_flow_decoder_predicted.py) each save their own config under their own script's
+        # filename, not a single fixed name -- pick whichever train_flow_decoder*.yaml is there.
+        candidates = sorted(glob.glob(pjoin(flow_dir, 'train_flow_decoder*.yaml')))
+        assert candidates, f'No train_flow_decoder*.yaml found in {flow_dir}'
+        flow_cfg = load_config(candidates[0])
+        flow_model = load_flow_decoder(flow_cfg, vq_cfg, cfg.flow_decoder_ckpt, device)
 
     dataset_opt_path = 'checkpoint_dir/humanml3d/Comp_v6_KLD005/opt.txt'
     wrapper_opt = get_opt(dataset_opt_path, torch.device('cuda'), data_root=cfg.data.root_dir)
@@ -135,7 +201,10 @@ if __name__ == '__main__':
                                         cal_mm=cfg.cal_mm,
                                         sample_time=sample_time,
                                         temperature=temp,
-                                        top_p_thres=top_p
+                                        top_p_thres=top_p,
+                                        flow_model=flow_model,
+                                        dim_pose=cfg.data.dim_pose,
+                                        ode_steps=cfg.get('flow_decoder_ode_steps', 16)
                                     )
                                 )
                             end = time.time()

@@ -12,7 +12,7 @@ vq_ckpt: "net_best_fid.tar"
 data:
   name: 'humanml3d'
   unit_length: 4
-  root_dir: '/nas2/data/dpfla3573/code/MoScale/dataset/HumanML3D'
+  root_dir: '/home/data/yerim/code/MoScale/dataset/HumanML3D'
   joint_num: 22
   dim_pose: 263
   fps: 20

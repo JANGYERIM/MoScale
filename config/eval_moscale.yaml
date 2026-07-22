@@ -6,6 +6,13 @@ moscale_name: 'moscale'  # set to your trained MoScale experiment name (exp.name
 which_epoch: 'net_best_fid.tar'
 ext: 'test'
 
+# Set to a flow_decoder exp.name (e.g. 'FLOWDEC_P1-1', matching exp.name in train_flow_decoder.yaml)
+# to decode MoScale's predicted tokens with the trained rectified-flow decoder instead of
+# HRVQVAE's own decoder. Leave null to evaluate with HRVQVAE's decoder as before.
+flow_decoder_name: null
+flow_decoder_ckpt: 'net_best_fid.tar'  # 'net_best_fid.tar' or 'net_best_mpjpe.tar'
+flow_decoder_ode_steps: 16
+
 cond_scales: [5]
 temperature: [1]
 sample_times: [[1, 2, 5, 10]]
@@ -17,4 +24,5 @@ repeat_time: 20
 
 data:
   name: 'humanml3d'
-  root_dir: '/nas2/data/dpfla3573/code/MoScale/dataset/HumanML3D'
+  dim_pose: 263
+  root_dir: '/home/data/yerim/code/MoScale/dataset/HumanML3D'

@@ -647,9 +647,27 @@ def evaluation_moscale_transformer(out_dir, val_loader, trans, vq_model, writer,
 
 @torch.no_grad()
 def evaluation_moscale(val_loader, vq_model, trans, repeat_id, eval_wrapper,
-                                cond_scale, cal_mm=True, sample_time=None, temperature=1, top_p_thres=0.9):
+                                cond_scale, cal_mm=True, sample_time=None, temperature=1, top_p_thres=0.9,
+                                flow_model=None, dim_pose=263, ode_steps=16):
+    """flow_model, if given, decodes MoScale's predicted token ids (`mids`) with the trained
+    rectified-flow decoder instead of the deterministic HRVQVAE decoder -- same swap as
+    evaluation_flow_decoder does for GT-motion reconstruction, but here on generated tokens."""
     trans.eval()
     vq_model.eval()
+    if flow_model is not None:
+        flow_model.eval()
+
+    def decode(mids, m_length, seq_len):
+        if flow_model is None:
+            return vq_model.forward_decoder(mids, m_length.clone())
+        x_d = vq_model.quantizer.get_codes_from_indices(mids)
+        down_len = m_length.clone() // (2 ** vq_model.down_t)
+        mask = length_to_mask(down_len, x_d.shape[1], device=x_d.device)
+        x_d = x_d.clone()
+        x_d[~mask] = 0
+        padding_mask = ~length_to_mask(m_length, seq_len, device=x_d.device)
+        return flow_model.sample(y=x_d, batch_size=x_d.shape[0], steps=ode_steps,
+                                  padding_mask=padding_mask, data_shape=(seq_len, dim_pose))
 
     motion_annotation_list = []
     motion_pred_list = []
@@ -677,7 +695,7 @@ def evaluation_moscale(val_loader, vq_model, trans, repeat_id, eval_wrapper,
             motion_multimodality_batch = []
             for _ in range(30):
                 mids = trans.generate(clip_text, m_length//4, cond_scale, temperature=temperature, vq_model=vq_model, sample_time=sample_time, top_p_thres=top_p_thres)
-                pred_motions = vq_model.forward_decoder(mids, m_length.clone())
+                pred_motions = decode(mids, m_length, seq)
 
                 et_pred, em_pred = eval_wrapper.get_co_embeddings(word_embeddings, pos_one_hots, sent_len, pred_motions.clone(),
                                                                   m_length)
@@ -686,7 +704,7 @@ def evaluation_moscale(val_loader, vq_model, trans, repeat_id, eval_wrapper,
             motion_multimodality.append(motion_multimodality_batch)
         else:
             mids = trans.generate(clip_text, m_length//4, cond_scale, temperature=temperature, vq_model=vq_model, sample_time=sample_time, top_p_thres=top_p_thres)
-            pred_motions = vq_model.forward_decoder(mids, m_length.clone())
+            pred_motions = decode(mids, m_length, seq)
 
             et_pred, em_pred = eval_wrapper.get_co_embeddings(word_embeddings, pos_one_hots, sent_len,
                                                               pred_motions.clone(),

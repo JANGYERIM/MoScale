@@ -21,11 +21,17 @@ def def_value():
 
 
 class FlowDecoderTrainer(BaseTrainer):
-    def __init__(self, cfg, flow_model, vq_model, device):
+    def __init__(self, cfg, flow_model, vq_model, device, precomputed_z=False):
         self.cfg = cfg
         self.device = device
         self.vq_model = vq_model
         self.vq_model.eval()
+
+        # If True, `forward` expects batches of (motion, z) with `z` already computed offline
+        # (e.g. from MoScale's own greedy predicted tokens -- see
+        # dataset/predicted_token_dataset.py) instead of re-encoding the GT window through
+        # `vq_model` on the fly.
+        self.precomputed_z = precomputed_z
 
         # `self.model` is the raw (never DataParallel-wrapped) module -- single source of
         # truth for EMA, `.sample()` during eval, and checkpoint state_dicts. DataParallel
@@ -50,22 +56,29 @@ class FlowDecoderTrainer(BaseTrainer):
         self.logger = SummaryWriter(cfg.exp.log_dir)
 
     def forward(self, batch_data):
-        _, motion, m_lens = batch_data
-        motion = motion.detach().to(self.device).float()
-        m_lens = m_lens.detach().to(self.device).long()
+        if self.precomputed_z:
+            _, motion, z = batch_data
+            motion = motion.detach().to(self.device).float()
+            z = z.detach().to(self.device).float()
+            padding_mask = None  # every window is exactly window_size frames, no padding
+        else:
+            _, motion, m_lens = batch_data
+            motion = motion.detach().to(self.device).float()
+            m_lens = m_lens.detach().to(self.device).long()
 
-        with torch.no_grad():
-            z = self.vq_model.get_quantized_latent(motion[..., :self.cfg.data.dim_pose], m_lens.clone())
-        z = z.permute(0, 2, 1)  # (B, code_dim, T_z) -> (B, T_z, code_dim)
+            with torch.no_grad():
+                z = self.vq_model.get_quantized_latent(motion[..., :self.cfg.data.dim_pose], m_lens.clone())
+            z = z.permute(0, 2, 1)  # (B, code_dim, T_z) -> (B, T_z, code_dim)
 
-        mask = self.lengths_to_mask(m_lens, max_len=motion.shape[1])  # True == valid frame
-        padding_mask = ~mask  # True == padded frame (matches flow decoder / attn convention)
+            mask = self.lengths_to_mask(m_lens, max_len=motion.shape[1])  # True == valid frame
+            padding_mask = ~mask  # True == padded frame (matches flow decoder / attn convention)
 
         # DataParallel runs one replica per GPU and returns one scalar loss per replica
         # (gathered into a small vector on the primary device); .mean() reduces that back to
         # a single scalar. On a single GPU this is already a 0-dim scalar, so .mean() is a
         # no-op.
-        loss = self.flow_model(motion[..., :self.cfg.data.dim_pose], y=z, padding_mask=padding_mask)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            loss = self.flow_model(motion[..., :self.cfg.data.dim_pose], y=z, padding_mask=padding_mask)
         return loss.mean()
 
     def save(self, file_name, ep):
@@ -146,9 +159,15 @@ class FlowDecoderTrainer(BaseTrainer):
                 mean_val_loss[tag] = value / len(val_loader)
             print_val_loss(mean_val_loss, epoch)
 
-            if epoch % self.cfg.training.eval_every_e == 0:
-                eval_model = self.ema_model if self.ema_rate else self.model
-                fid, mpjpe = evaluation_flow_decoder(
-                    self.cfg.exp.model_dir, eval_val_loader, eval_model, self.vq_model, self.cfg,
-                    self.logger, epoch, it, best_fid=best_fid, best_mpjpe=best_mpjpe, eval_wrapper=eval_wrapper)
+            eval_model = self.ema_model if self.ema_rate else self.model
+            torch.save({'flow_model': eval_model.state_dict(), 'ep': epoch},
+                       os.path.join(self.cfg.exp.model_dir, 'latest.tar'))
+
+            eval_every_e = self.cfg.training.get('eval_every_e', 5)
+            is_last_epoch = epoch == self.cfg.training.max_epoch
+            if epoch % eval_every_e == 0 or is_last_epoch:
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    fid, mpjpe = evaluation_flow_decoder(
+                        self.cfg.exp.model_dir, eval_val_loader, eval_model, self.vq_model, self.cfg,
+                        self.logger, epoch, it, best_fid=best_fid, best_mpjpe=best_mpjpe, eval_wrapper=eval_wrapper)
                 best_fid, best_mpjpe = min(best_fid, fid), min(best_mpjpe, mpjpe)
