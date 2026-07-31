@@ -101,8 +101,10 @@ if __name__ == '__main__':
     eval_loader, _ = get_dataset_motion_loader(dataset_opt_path, 32, 'test', device=device, data_root=cfg.data.root_dir)
 
 
+    which_epochs = [cfg.which_epoch] if isinstance(cfg.which_epoch, str) else list(cfg.which_epoch)
+
     for file in os.listdir(cfg.model_dir):
-        if cfg.which_epoch != "all" and cfg.which_epoch not in file:
+        if "all" not in which_epochs and not any(w in file for w in which_epochs):
             continue
         print('loading checkpoint {}'.format(file))
         moscale = load_trans_model(moscale_cfg, file, device)

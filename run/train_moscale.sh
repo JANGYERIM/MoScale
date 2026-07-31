@@ -1,12 +1,12 @@
 #!/usr/bin/bash
-#SBATCH -J MS_Baseline_Moscale4
+#SBATCH -J MS_Baseline_Moscale3
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=29G
 #SBATCH -p batch_grad
 #SBATCH -w ariel-v4
 #SBATCH -t 4-0
-#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_Baseline_Moscale4.out
+#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_Baseline_Moscale.out
 
 
 cd /nas2/data/dpfla3573/code/MoScale

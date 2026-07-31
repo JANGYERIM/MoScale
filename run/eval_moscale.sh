@@ -1,12 +1,12 @@
 #!/usr/bin/bash
-#SBATCH -J Eval_SeCo_P1-2
+#SBATCH -J Eval_SeCo_BASELINE1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-gpu=8
 #SBATCH --mem-per-gpu=29G
 #SBATCH -p batch_grad
 #SBATCH -w ariel-v4
 #SBATCH -t 1-0
-#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_Eval_SeCo_P1-2.out
+#SBATCH -o /nas2/data/dpfla3573/code/MoScale/logs/slurm-%A_Eval_Moscale(checkpoint_v4).out
 
 
 cd /nas2/data/dpfla3573/code/MoScale
