@@ -14,7 +14,7 @@ export TZ='KST-9'
 GPUS=0
 
 # train_flow_decoder.yaml의 exp.name과 일치해야 함 (checkpoint_dir/humanml3d/flow_decoder/<name>/)
-FLOW_DECODER_NAME=${FLOW_DECODER_NAME:-FLOWDEC_PREDICTED}
+FLOW_DECODER_NAME=${FLOW_DECODER_NAME:-FLOWDEC_PREDICTED3}
 MODEL_DIR="./checkpoint_dir/humanml3d/flow_decoder/$FLOW_DECODER_NAME/model"
 
 # flow_decoder_trainer.py가 저장하는 세 체크포인트를 순회 평가.
